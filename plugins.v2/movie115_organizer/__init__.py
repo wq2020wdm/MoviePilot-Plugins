@@ -1,4 +1,4 @@
-import re
+import inspect
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -10,17 +10,17 @@ from app.schemas.file import FileItem
 
 
 class movie115_organizer(_PluginBase):
-    # ── 插件元信息 ──────────────────────────────────────────────
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径。"
     plugin_icon = "Folder"
-    plugin_version = "1.4.0"
+    plugin_version = "1.4.1"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
 
     _lock = Lock()
+    _u115_instance = None   # 缓存底层模块实例
 
     _enabled: bool = False
     _cron: str = "0 */2 * * *"
@@ -53,6 +53,41 @@ class movie115_organizer(_PluginBase):
 
     def stop_service(self):
         pass
+
+    # ═══════════════════════════════════════════════════════════
+    #  获取底层 u115 实例（动态探测类名）
+    # ═══════════════════════════════════════════════════════════
+
+    def _get_u115_instance(self):
+        if movie115_organizer._u115_instance is not None:
+            return movie115_organizer._u115_instance
+        try:
+            import app.modules.filemanager.storages.u115 as u115_mod
+
+            # 找出模块中所有类
+            all_classes = [
+                (name, cls) for name, cls in inspect.getmembers(u115_mod, inspect.isclass)
+                if cls.__module__ == u115_mod.__name__
+            ]
+            logger.info(f"【115整理】u115 模块中的类: {[n for n, _ in all_classes]}")
+
+            if not all_classes:
+                logger.error("【115整理】u115 模块中没有找到任何类")
+                return None
+
+            # 取第一个（通常只有一个主类）
+            cls_name, cls = all_classes[0]
+            inst = cls()
+            methods = sorted([m for m in dir(inst) if not m.startswith("_")])
+            move_methods = [m for m in methods if any(k in m.lower() for k in ("move", "mv", "transfer", "copy"))]
+            logger.info(f"【115整理】{cls_name} 实例化成功，move相关方法: {move_methods}")
+            logger.info(f"【115整理】{cls_name} 全部方法: {methods}")
+
+            movie115_organizer._u115_instance = inst
+            return inst
+        except Exception as e:
+            logger.error(f"【115整理】获取 u115 实例失败: {e}", exc_info=True)
+            return None
 
     # ═══════════════════════════════════════════════════════════
     #  主流程
@@ -151,7 +186,7 @@ class movie115_organizer(_PluginBase):
                 except Exception as e:
                     logger.error(f"【115整理】[{fname}] 重命名异常: {e}", exc_info=True)
 
-        # Step 5: 移动
+        # Step 5: 移动文件夹
         target_path = self._target_path.rstrip("/")
         target_item = self._get_fileitem(storage, target_path)
         if not target_item:
@@ -164,167 +199,155 @@ class movie115_organizer(_PluginBase):
         return ok
 
     # ═══════════════════════════════════════════════════════════
-    #  移动：四种方案依次尝试
+    #  移动：用 fileid 直接调底层模块
     # ═══════════════════════════════════════════════════════════
 
     def _do_move(self, storage: StorageChain, src: FileItem, dst: FileItem) -> bool:
-
-        # ── 方案A：StorageChain.run_module() 调底层 move_file ──
-        # ChainBase.run_module 会把调用路由到实际实现模块
-        logger.info("【115整理】方案A: StorageChain.run_module('move_file', ...)")
-        try:
-            result = storage.run_module("move_file", src, dst)
-            if result:
-                logger.info("【115整理】方案A 成功")
-                return True
-            logger.info(f"【115整理】方案A 返回: {result}")
-        except Exception as e:
-            logger.warning(f"【115整理】方案A 异常: {e}")
-
-        # ── 方案B：直接调用 p115client 原生 move API ───────────
-        logger.info("【115整理】方案B: 直接调用 p115client 原生 API")
-        try:
-            result = self._p115_move(src, dst)
-            if result:
-                logger.info("【115整理】方案B 成功")
-                return True
-        except Exception as e:
-            logger.warning(f"【115整理】方案B 异常: {e}")
-
-        # ── 方案C：通过 FileManagerModule 移动 ────────────────
-        logger.info("【115整理】方案C: FileManagerModule")
-        try:
-            from app.modules.filemanager import FileManagerModule
-            fm = FileManagerModule()
-            # 探测可用方法
-            fm_methods = [m for m in dir(fm) if "move" in m.lower() or "transfer" in m.lower()]
-            logger.info(f"【115整理】FileManagerModule move相关方法: {fm_methods}")
-            for mname in fm_methods:
-                m = getattr(fm, mname, None)
-                if not callable(m):
-                    continue
-                try:
-                    ok = m(src, dst)
-                    if ok:
-                        logger.info(f"【115整理】方案C FileManagerModule.{mname}() 成功")
-                        return True
-                except Exception as e2:
-                    logger.warning(f"【115整理】方案C {mname} 异常: {e2}")
-        except Exception as e:
-            logger.warning(f"【115整理】方案C 异常: {e}")
-
-        # ── 方案D：打印所有可探测到的方法，彻底暴露 API 名 ───
-        logger.error("【115整理】所有方案均失败，打印完整诊断信息：")
-        try:
-            sc_methods = sorted([m for m in dir(storage) if not m.startswith("_") and callable(getattr(storage, m))])
-            logger.error(f"【115整理】StorageChain 全部方法: {sc_methods}")
-        except Exception:
-            pass
-        try:
-            src_attrs = {k: str(v) for k, v in vars(src).items() if not k.startswith("_")}
-            logger.error(f"【115整理】src FileItem 属性: {src_attrs}")
-        except Exception:
-            pass
-        try:
-            dst_attrs = {k: str(v) for k, v in vars(dst).items() if not k.startswith("_")}
-            logger.error(f"【115整理】dst FileItem 属性: {dst_attrs}")
-        except Exception:
-            pass
-        return False
-
-    def _p115_move(self, src: FileItem, dst: FileItem) -> bool:
-        """
-        直接通过 p115client 调用 115 原生移动接口。
-        MoviePilot 内部用 p115client 库与 115 通信，这里绕过封装直接调用。
-        """
-        # 获取 src 和 dst 的 fileid（115 cid）
-        src_id = getattr(src, "fileid", None) or getattr(src, "file_id", None) or getattr(src, "id", None)
-        dst_id = getattr(dst, "fileid", None) or getattr(dst, "file_id", None) or getattr(dst, "id", None)
-        logger.info(f"【115整理】p115 move: src_id={src_id}, dst_id={dst_id}")
+        src_id = getattr(src, "fileid", None)
+        dst_id = getattr(dst, "fileid", None)
+        logger.info(f"【115整理】move fileid: src={src_id}  dst={dst_id}")
 
         if not src_id or not dst_id:
-            logger.error(f"【115整理】无法获取 fileid，src_id={src_id}, dst_id={dst_id}")
+            logger.error(f"【115整理】fileid 为空，无法移动")
             return False
 
-        # 方式1: 通过 u115 存储模块拿到 p115client 实例
-        client = self._get_p115_client()
-        if client is None:
-            logger.error("【115整理】无法获取 p115client 实例")
-            return False
-
-        # p115client 中移动文件夹的方法名可能是:
-        # client.fs_move / client.move / client.fs.move / client.fs.mv
-        for attr_path in (
-            "fs_move",       # p115client 直接方法
-            "move",
-            "fs.move",       # 通过 fs 子对象
-            "fs.mv",
-            "fs.rename",
-        ):
-            parts = attr_path.split(".")
-            obj = client
-            try:
-                for p in parts:
-                    obj = getattr(obj, p)
-                logger.info(f"【115整理】尝试 client.{attr_path}([{src_id}], {dst_id})")
-                # 115 move API：第一个参数是文件id列表，第二个是目标目录cid
-                result = obj([src_id], dst_id)
-                logger.info(f"【115整理】client.{attr_path}() 结果: {result}")
+        # ── 方案1：StorageChain.run_module("move_file") ─────
+        logger.info("【115整理】方案1: run_module('move_file')")
+        try:
+            result = storage.run_module("move_file", src, dst)
+            if result is not None and result is not False:
+                logger.info(f"【115整理】方案1成功，结果: {result}")
                 return True
-            except AttributeError:
-                pass
-            except Exception as e:
-                logger.warning(f"【115整理】client.{attr_path}() 异常: {e}")
+            logger.info(f"【115整理】方案1返回: {result}")
+        except Exception as e:
+            logger.warning(f"【115整理】方案1异常: {e}")
 
-        # 打印 client 所有方法
-        c_methods = sorted([m for m in dir(client) if not m.startswith("_") and ("move" in m.lower() or "mv" in m.lower() or "transfer" in m.lower())])
-        c_all = sorted([m for m in dir(client) if not m.startswith("_")])
-        logger.error(f"【115整理】p115client move相关方法: {c_methods}")
-        logger.error(f"【115整理】p115client 全部方法(前50): {c_all[:50]}")
+        # ── 方案2：动态探测 u115 底层类，用 fileid 调 move ──
+        logger.info("【115整理】方案2: 动态探测 u115 实例")
+        u115 = self._get_u115_instance()
+        if u115 is not None:
+            # 尝试所有 move 相关方法，每种参数形式都试
+            move_methods = [m for m in dir(u115)
+                            if not m.startswith("_")
+                            and any(k in m.lower() for k in ("move", "mv"))]
+            logger.info(f"【115整理】u115 move方法候选: {move_methods}")
+
+            for mname in move_methods:
+                method = getattr(u115, mname, None)
+                if not callable(method):
+                    continue
+                # 115 move API 通常是 move([fileid_list], dst_cid)
+                for call_args in (
+                    ([src_id], dst_id),          # 列表形式
+                    (src_id, dst_id),             # 单值形式
+                    (src, dst),                   # FileItem 形式
+                ):
+                    try:
+                        logger.info(f"【115整理】尝试 u115.{mname}{call_args}")
+                        result = method(*call_args)
+                        logger.info(f"【115整理】u115.{mname} 结果: {result}")
+                        # 判断成功：非 None、非 False、非空 dict/list
+                        if result not in (None, False, {}, []):
+                            return True
+                        # 有些 API 成功返回空 dict，再检查一下
+                        if result == {} or result == []:
+                            logger.info(f"【115整理】u115.{mname} 返回空对象，视为成功")
+                            return True
+                    except TypeError:
+                        continue  # 参数不匹配，换下一种形式
+                    except Exception as e:
+                        logger.warning(f"【115整理】u115.{mname}{call_args} 异常: {e}")
+                        break  # 同一方法不同参数都失败，换方法
+
+        # ── 方案3：直接用 requests 调 115 WebAPI ───────────
+        logger.info("【115整理】方案3: 直接调用 115 WebAPI /files/move")
+        try:
+            result = self._webapi_move(src_id, dst_id)
+            if result:
+                logger.info("【115整理】方案3成功")
+                return True
+        except Exception as e:
+            logger.warning(f"【115整理】方案3异常: {e}")
+
         return False
 
-    def _get_p115_client(self):
+    def _webapi_move(self, src_id: str, dst_id: str) -> bool:
         """
-        尝试多种路径获取 MoviePilot 内部的 p115client 实例。
+        从 MoviePilot 已有的 115 认证信息里取 cookie，
+        直接调 115 官方 WebAPI 执行移动。
         """
-        # 路径1: 从 u115 存储实例中获取 client 属性
         try:
-            from app.modules.filemanager.storages.u115 import U115Storage
-            u = U115Storage()
-            for attr in ("client", "_client", "p115", "_p115", "api", "_api", "driver", "_driver"):
-                c = getattr(u, attr, None)
-                if c is not None:
-                    logger.info(f"【115整理】从 U115Storage.{attr} 获取到 client: {type(c)}")
-                    return c
-            # 打印 U115Storage 全部属性帮助定位
-            u_attrs = [a for a in dir(u) if not a.startswith("__")]
-            logger.info(f"【115整理】U115Storage 属性列表: {u_attrs}")
+            # 从 MoviePilot 配置里获取 115 cookie
+            cookie = self._get_115_cookie()
+            if not cookie:
+                logger.error("【115整理】无法获取 115 cookie，跳过方案3")
+                return False
+
+            import requests
+            url = "https://webapi.115.com/files/move"
+            data = {
+                "pid": dst_id,
+                "fid[0]": src_id,
+            }
+            headers = {
+                "Cookie": cookie,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": "https://115.com",
+            }
+            resp = requests.post(url, data=data, headers=headers, timeout=15)
+            resp_json = resp.json()
+            logger.info(f"【115整理】115 WebAPI move 响应: {resp_json}")
+
+            if resp_json.get("state") or resp_json.get("errno") == 0:
+                return True
+            logger.error(f"【115整理】115 WebAPI move 失败: {resp_json}")
+            return False
+
         except Exception as e:
-            logger.warning(f"【115整理】获取 U115Storage 失败: {e}")
+            logger.error(f"【115整理】_webapi_move 异常: {e}", exc_info=True)
+            return False
 
-        # 路径2: 直接 import p115client 并看是否有全局单例
+    def _get_115_cookie(self) -> Optional[str]:
+        """从 MoviePilot 存储配置中读取 115 cookie。"""
         try:
-            import p115client
-            for attr in ("client", "default_client", "get_client"):
-                c = getattr(p115client, attr, None)
-                if c is not None:
-                    if callable(c):
-                        c = c()
-                    logger.info(f"【115整理】从 p115client.{attr} 获取到 client: {type(c)}")
-                    return c
-        except ImportError:
-            logger.warning("【115整理】p115client 模块未找到，尝试其他路径")
+            # 方式1：从 app.core.config 的 Settings 读取
+            from app.core.config import settings
+            for attr in ("P115_COOKIE", "p115_cookie", "STORAGE_115_COOKIE",
+                         "u115_cookie", "U115_COOKIE", "PAN115_COOKIE"):
+                val = getattr(settings, attr, None)
+                if val:
+                    logger.info(f"【115整理】从 settings.{attr} 获取到 cookie")
+                    return val
 
-        # 路径3: 通过 app.core.config 或全局上下文
-        try:
-            from app import core
-            c = getattr(core, "p115_client", None) or getattr(core, "client_115", None)
-            if c:
-                return c
-        except Exception:
-            pass
+            # 方式2：从数据库站点/存储配置读取
+            try:
+                from app.db.systemconfig_oper import SystemConfigOper
+                sc = SystemConfigOper()
+                for key in ("115Cookie", "Pan115Cookie", "u115", "storage_u115"):
+                    val = sc.get(key)
+                    if val:
+                        logger.info(f"【115整理】从 SystemConfig[{key!r}] 获取到 cookie")
+                        return val if isinstance(val, str) else str(val)
+            except Exception:
+                pass
 
-        return None
+            # 方式3：从 u115 模块实例读取 cookie 属性
+            u115 = self._get_u115_instance()
+            if u115:
+                for attr in ("cookie", "_cookie", "cookies", "_cookies",
+                             "access_token", "_access_token"):
+                    val = getattr(u115, attr, None)
+                    if val:
+                        logger.info(f"【115整理】从 u115.{attr} 获取到认证信息")
+                        return val if isinstance(val, str) else str(val)
+
+            logger.error("【115整理】所有方式均无法获取 115 cookie")
+            return None
+
+        except Exception as e:
+            logger.error(f"【115整理】_get_115_cookie 异常: {e}", exc_info=True)
+            return None
 
     # ═══════════════════════════════════════════════════════════
     #  工具方法
@@ -346,8 +369,7 @@ class movie115_organizer(_PluginBase):
                 if not matched:
                     logger.error(
                         f"【115整理】路径段 '{part}' 未找到，"
-                        f"当前层: {[item.name for item in current_items[:10]]}，"
-                        f"目标: {path}"
+                        f"当前层: {[item.name for item in current_items[:10]]}，目标: {path}"
                     )
                     return None
                 current_item = matched

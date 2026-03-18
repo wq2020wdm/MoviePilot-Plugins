@@ -1,20 +1,23 @@
+import os
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.chain.storage import StorageChain
+from app.core.event import eventmanager, Event
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from app.schemas.file import FileItem
+from app.schemas.types import EventType
 
 
 class movie115_organizer(_PluginBase):
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
-    plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径。"
+    plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径，并生成STRM文件。"
     plugin_icon = "Folder"
-    plugin_version = "1.4.4"
+    plugin_version = "1.4.5"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -29,19 +32,27 @@ class movie115_organizer(_PluginBase):
     _size_threshold_mb: int = 500
     _notify: bool = True
     _run_once: bool = False
+    # STRM 相关
+    _strm_enabled: bool = False
+    _strm_local_path: str = ""
+    _strm_template: str = "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}"
 
     def init_plugin(self, config: dict = None):
         if config:
-            self._enabled       = config.get("enabled", False)
-            self._cron          = config.get("cron", "0 */2 * * *")
-            self._monitor_paths = config.get("monitor_paths", "")
-            self._target_path   = config.get("target_path", "")
+            self._enabled           = config.get("enabled", False)
+            self._cron              = config.get("cron", "0 */2 * * *")
+            self._monitor_paths     = config.get("monitor_paths", "")
+            self._target_path       = config.get("target_path", "")
             try:
                 self._size_threshold_mb = int(config.get("size_threshold_mb", 500))
             except Exception:
                 self._size_threshold_mb = 500
-            self._notify   = config.get("notify", True)
-            self._run_once = config.get("run_once", False)
+            self._notify            = config.get("notify", True)
+            self._run_once          = config.get("run_once", False)
+            self._strm_enabled      = config.get("strm_enabled", False)
+            self._strm_local_path   = config.get("strm_local_path", "")
+            self._strm_template     = config.get("strm_template",
+                "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}")
 
         if self._run_once:
             self._run_once = False
@@ -53,6 +64,37 @@ class movie115_organizer(_PluginBase):
 
     def stop_service(self):
         pass
+
+    # ═══════════════════════════════════════════════════════════
+    #  Telegram Bot 命令注册（v2 标准格式）
+    # ═══════════════════════════════════════════════════════════
+
+    def get_command(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "cmd": "/run_115_clean",
+                "event": EventType.PluginAction,
+                "desc": "立即整理 115 目录",
+                "category": "整理",
+                "data": {"action": "run_115_clean"},
+            }
+        ]
+
+    @eventmanager.register(EventType.PluginAction)
+    def handle_command(self, event: Event):
+        """响应 Telegram Bot /run_115_clean 指令"""
+        if not event or not event.event_data:
+            return
+        if event.event_data.get("action") != "run_115_clean":
+            return
+        logger.info("【115整理】收到 Bot 指令，立即执行")
+        self.post_message(
+            mtype=NotificationType.SiteMessage,
+            title="115整理",
+            text="已收到指令，开始执行整理任务…"
+        )
+        import threading
+        threading.Thread(target=self.execute, daemon=True).start()
 
     # ═══════════════════════════════════════════════════════════
     #  获取 U115Pan 实例
@@ -155,23 +197,76 @@ class movie115_organizer(_PluginBase):
             logger.warning(f"【115整理】[{fname}] 小文件未删完，跳过")
             return False
 
-        # Step 4: 重命名文件（去 @ 前缀）
-        for bf in [f for f in remaining if (f.size or 0) >= threshold_bytes]:
+        # Step 4: 重命名大文件（去 @ 前缀），同时记录 pickcode
+        big_files = [f for f in remaining if (f.size or 0) >= threshold_bytes]
+        # 用于后续生成 STRM，记录(最终文件名, pickcode)
+        strm_targets: List[Tuple[str, str]] = []
+
+        for bf in big_files:
+            pickcode = getattr(bf, "pickcode", None) or ""
             if "@" in bf.name:
                 new_fname = bf.name.split("@")[-1]
                 logger.info(f"【115整理】[{fname}] 重命名: {bf.name!r} → {new_fname!r}")
                 try:
                     ok = storage.rename_file(bf, new_fname)
                     logger.info(f"【115整理】[{fname}] 重命名{'成功' if ok else '失败'}")
+                    if ok:
+                        strm_targets.append((new_fname, pickcode))
+                    else:
+                        strm_targets.append((bf.name, pickcode))
                 except Exception as e:
                     logger.error(f"【115整理】[{fname}] 重命名异常: {e}", exc_info=True)
+                    strm_targets.append((bf.name, pickcode))
+            else:
+                strm_targets.append((bf.name, pickcode))
 
         # Step 5: 移动文件夹
         target_path = self._target_path.rstrip("/")
         logger.info(f"【115整理】[{fname}] 开始移动 → {target_path}")
         ok = self._do_move(folder, target_path)
         logger.info(f"【115整理】[{fname}] 移动结果: {'✅成功' if ok else '❌失败'}")
-        return ok
+        if not ok:
+            return False
+
+        # Step 6: 生成 STRM 文件
+        if self._strm_enabled and self._strm_local_path.strip():
+            for file_name, pickcode in strm_targets:
+                self._generate_strm(fname, file_name, pickcode, target_path)
+
+        return True
+
+    # ═══════════════════════════════════════════════════════════
+    #  STRM 生成
+    # ═══════════════════════════════════════════════════════════
+
+    def _generate_strm(self, folder_name: str, file_name: str,
+                       pickcode: str, cloud_target_path: str):
+        """
+        在本地路径下创建同名文件夹，生成 .strm 文件。
+        cloud_file = {cloud_target_path}/{folder_name}/{file_name}
+        """
+        try:
+            # 本地目录：strm_local_path / folder_name
+            local_dir = Path(self._strm_local_path.rstrip("/")) / folder_name
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+            # strm 文件名：去掉原始扩展名，换成 .strm
+            stem = Path(file_name).stem
+            strm_file = local_dir / f"{stem}.strm"
+
+            # 云端完整路径（URL 编码中保持原样）
+            cloud_file = f"{cloud_target_path}/{folder_name}/{file_name}"
+
+            # 替换模板中的占位符
+            content = (self._strm_template
+                       .replace("{cloud_file}", cloud_file)
+                       .replace("{pick_code}", pickcode))
+
+            strm_file.write_text(content, encoding="utf-8")
+            logger.info(f"【115整理】STRM 生成成功: {strm_file}  内容: {content}")
+
+        except Exception as e:
+            logger.error(f"【115整理】STRM 生成失败 ({folder_name}/{file_name}): {e}", exc_info=True)
 
     # ═══════════════════════════════════════════════════════════
     #  移动：正确调用 U115Pan.move(fileitem, Path, new_name)
@@ -179,12 +274,8 @@ class movie115_organizer(_PluginBase):
 
     def _do_move(self, src: FileItem, target_path: str) -> bool:
         """
-        U115Pan.move 签名（已确认）:
+        U115Pan.move 签名（已通过日志确认）:
             move(self, fileitem: FileItem, path: Path, new_name: str) -> bool
-        其中：
-            fileitem  = 要移动的源 FileItem
-            path      = 目标目录的 Path（用 pathlib.Path）
-            new_name  = 移动后保持原名不变，传 src.name 即可
         """
         u115 = self._get_u115()
         if u115 is None:
@@ -192,7 +283,7 @@ class movie115_organizer(_PluginBase):
             return False
 
         dst_path = Path(target_path)
-        logger.info(f"【115整理】调用 U115Pan.move(fileitem={src.name}, path={dst_path}, new_name={src.name})")
+        logger.info(f"【115整理】U115Pan.move({src.name!r}, {dst_path}, {src.name!r})")
         try:
             ok = u115.move(src, dst_path, src.name)
             logger.info(f"【115整理】U115Pan.move 返回: {ok}")
@@ -244,23 +335,20 @@ class movie115_organizer(_PluginBase):
 
     def _current_config(self) -> dict:
         return {
-            "enabled": self._enabled, "cron": self._cron,
-            "monitor_paths": self._monitor_paths, "target_path": self._target_path,
-            "size_threshold_mb": self._size_threshold_mb, "notify": self._notify
+            "enabled": self._enabled,
+            "cron": self._cron,
+            "monitor_paths": self._monitor_paths,
+            "target_path": self._target_path,
+            "size_threshold_mb": self._size_threshold_mb,
+            "notify": self._notify,
+            "strm_enabled": self._strm_enabled,
+            "strm_local_path": self._strm_local_path,
+            "strm_template": self._strm_template,
         }
 
     # ═══════════════════════════════════════════════════════════
     #  V2 接口
     # ═══════════════════════════════════════════════════════════
-
-    def get_command(self) -> List[Dict[str, Any]]:
-        return [{
-            "command": "run_115_clean",
-            "data": "run_115_clean",
-            "description": "立即整理 115 目录",
-            "handler": self.execute,
-            "icon": "PlayArrow"
-        }]
 
     def get_api(self) -> List[dict]: return []
     def get_page(self) -> List[dict]: return []
@@ -281,20 +369,83 @@ class movie115_organizer(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
+                    # ── 行1: 基础开关 ──────────────────────────
                     {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "发送通知"}}]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后运行一次"}}]}
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                            {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                            {"component": "VSwitch", "props": {"model": "notify", "label": "发送通知"}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                            {"component": "VSwitch", "props": {"model": "strm_enabled", "label": "生成STRM"}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                            {"component": "VSwitch", "props": {"model": "run_once", "label": "保存后运行一次"}}]},
                     ]},
+                    # ── 行2: Cron + 阈值 ───────────────────────
                     {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "cron", "label": "Cron 表达式"}}]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "size_threshold_mb", "label": "阈值 (MB)", "type": "number"}}]}
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                            {"component": "VTextField", "props": {"model": "cron", "label": "Cron 表达式",
+                                "hint": "建议间隔≥30分钟，如 0 */2 * * *"}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                            {"component": "VTextField", "props": {"model": "size_threshold_mb",
+                                "label": "垃圾文件阈值 (MB)", "type": "number",
+                                "hint": "小于此值的文件视为广告/预告片并删除"}}]},
                     ]},
-                    {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "monitor_paths", "label": "监控目录", "rows": 3}}]}]},
-                    {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "target_path", "label": "目标路径"}}]}]}
+                    # ── 行3: 监控目录 ──────────────────────────
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [
+                            {"component": "VTextarea", "props": {"model": "monitor_paths",
+                                "label": "监控目录（每行一个115路径）",
+                                "placeholder": "/CloudNAS/temp/小姐姐",
+                                "rows": 3}}]},
+                    ]},
+                    # ── 行4: 目标路径 ──────────────────────────
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [
+                            {"component": "VTextField", "props": {"model": "target_path",
+                                "label": "115 移动目标路径",
+                                "placeholder": "/CloudNAS/电影",
+                                "hint": "洗白后的文件夹将移动到此路径"}}]},
+                    ]},
+                    # ── 行5: STRM 本地路径 ─────────────────────
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [
+                            {"component": "VTextField", "props": {"model": "strm_local_path",
+                                "label": "STRM 本地根目录（需开启生成STRM）",
+                                "placeholder": "/media/strm/电影",
+                                "hint": "在此路径下创建同名文件夹并生成 .strm 文件"}}]},
+                    ]},
+                    # ── 行6: STRM 模板 ─────────────────────────
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [
+                            {"component": "VTextField", "props": {"model": "strm_template",
+                                "label": "STRM 内容模板",
+                                "hint": "可用占位符: {cloud_file}=云端完整路径, {pick_code}=115 pickcode"}}]},
+                    ]},
+                    # ── 说明 ───────────────────────────────────
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [
+                            {"component": "VAlert", "props": {
+                                "type": "info", "variant": "tonal",
+                                "text": (
+                                    "流程：扫描监控目录子文件夹 → 删除小于阈值的垃圾文件 → "
+                                    "大文件名含@则去除@前缀重命名 → 移动整个文件夹到目标路径 → "
+                                    "（可选）在本地生成 .strm 文件。\n"
+                                    "Telegram Bot 指令：/run_115_clean  可立即触发整理。\n"
+                                    "注意：移动操作可能受115 API限速(code 770004)，稍等后重试即可。"
+                                )}}],
+                        },
+                    ]},
                 ]
             }
         ], {
-            "enabled": False, "cron": "0 */2 * * *", "monitor_paths": "", "target_path": "",
-            "size_threshold_mb": 500, "notify": True, "run_once": False
+            "enabled": False,
+            "cron": "0 */2 * * *",
+            "monitor_paths": "",
+            "target_path": "",
+            "size_threshold_mb": 500,
+            "notify": True,
+            "run_once": False,
+            "strm_enabled": False,
+            "strm_local_path": "",
+            "strm_template": "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}",
         }

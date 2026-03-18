@@ -1,33 +1,30 @@
-import time
 from typing import List, Dict, Tuple, Any
 from app.plugins import _PluginBase
 from app.log import logger
 from app.schemas import NotificationType
 
 def get_p115_helper():
-    """动态获取 115 助手类，适配不同版本的 MP 路径"""
-    try:
-        from app.helper.p115 import P115Helper
-        return P115Helper
-    except ImportError:
+    """适配不同版本的 MP 路径"""
+    for path in ["app.helper.p115", "app.modules.p115"]:
         try:
-            from app.modules.p115 import P115Helper
-            return P115Helper
-        except ImportError:
-            return None
+            import importlib
+            mod = importlib.import_module(path)
+            return getattr(mod, "P115Helper")
+        except (ImportError, AttributeError):
+            continue
+    return None
 
-class Movie115Organizer(_PluginBase):
-    # --- V2 插件元数据 ---
+class movie115_organizer(_PluginBase):
+    # --- V2 插件元数据 (必须与文件夹名和 package.v2.json 的 Key 完全一致) ---
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115路径，自动清理小文件、按@符号重命名并移动归档。"
-    plugin_icon = ""
-    plugin_version = "1.2.4"
+    plugin_icon = "" # 留空则使用默认图标
+    plugin_version = "1.2.5"
     plugin_author = "YourName"
     plugin_order = 10
     auth_level = 1
 
-    # 配置变量
     _enabled = False
     _cron = None
     _monitor_path = None
@@ -43,7 +40,7 @@ class Movie115Organizer(_PluginBase):
             self._target_path = config.get("target_path")
             try:
                 self._threshold = float(config.get("threshold") or 500)
-            except (ValueError, TypeError):
+            except:
                 self._threshold = 500
             self._notify = config.get("notify")
 
@@ -51,7 +48,6 @@ class Movie115Organizer(_PluginBase):
         if not path: return None
         if path.isdigit(): return path
         if not path.startswith('/'): return path
-        
         parts = [p for p in path.split('/') if p]
         current_id = '0'
         for part in parts:
@@ -67,100 +63,49 @@ class Movie115Organizer(_PluginBase):
         return current_id
 
     def execute(self):
-        if not self._enabled:
-            return
-
+        if not self._enabled: return
         HelperClass = get_p115_helper()
         if not HelperClass:
-            logger.error("【115整理】核心模块加载失败：未找到 P115Helper")
+            logger.error("【115整理】核心模块加载失败")
             return
-
         p115 = HelperClass()
         m_id = self.get_id_by_path(p115, self._monitor_path)
         t_id = self.get_id_by_path(p115, self._target_path)
-
         if not m_id or not t_id:
-            logger.error("【115整理】配置错误：无法识别监控或目标路径")
+            logger.error("【115整理】路径配置有误")
             return
-
         try:
             items = p115.get_file_list(m_id)
             for item in items:
                 if not item.get('is_dir'): continue
-                
                 fid, fname = item.get('id'), item.get('name')
-                
-                # 1. 清理小文件
                 sub_files = p115.get_file_list(fid)
                 for sf in sub_files:
                     if not sf.get('is_dir'):
-                        size_mb = sf.get('size', 0) / (1024 * 1024)
+                        size_mb = sf.get('size', 0) / 1048576
                         if size_mb < self._threshold:
                             p115.delete_file(sf.get('id'))
-                            logger.info("【115整理】删除广告小文件: %s" % sf.get('name'))
-
-                # 2. 洗白重命名
                 new_name = fname.split('@')[-1] if '@' in fname else fname
                 if new_name != fname:
                     p115.rename_file(fid, new_name)
-                    logger.info("【115整理】重命名成功: %s -> %s" % (fname, new_name))
-
-                # 3. 移动归档
                 p115.move_file(fid, t_id)
                 logger.info("【115整理】归档成功: %s" % new_name)
-
                 if self._notify:
-                    self.post_message(
-                        mtype=NotificationType.SiteMessage,
-                        title="115 整理完成",
-                        text="已处理文件夹: %s" % new_name
-                    )
+                    self.post_message(NotificationType.SiteMessage, "115 整理完成", "已处理: %s" % new_name)
         except Exception as e:
-            logger.error("【115整理】运行报错: %s" % str(e))
+            logger.error("【115整理】报错: %s" % str(e))
 
     def get_service(self) -> List[Dict[str, Any]]:
         if self._enabled and self._cron:
             from apscheduler.triggers.cron import CronTrigger
-            return [{
-                "id": "Movie115Organizer",
-                "name": "115 整理服务",
-                "trigger": CronTrigger.from_crontab(self._cron),
-                "func": self.execute
-            }]
+            return [{"id": "movie115_organizer", "name": "115整理服务", "trigger": CronTrigger.from_crontab(self._cron), "func": self.execute}]
         return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return [
-            {
-                'component': 'VForm',
-                'content': [
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '发送通知'}}]}
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextField', 'props': {'model': 'monitor_path', 'label': '监控路径 (如 /Temp)'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextField', 'props': {'model': 'target_path', 'label': '目标路径 (如 /Media)'}}]}
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VCronField', 'props': {'model': 'cron', 'label': '执行周期'}}]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'threshold', 'label': '清理阈值 (MB)'}}]}
-                        ]
-                    }
-                ]
-            }
-        ], {"enabled": False, "notify": True, "threshold": 500, "cron": "*/30 * * * *"}
+        return [{'component': 'VForm', 'content': [{'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VSwitch', 'props': {'model': 'notify', 'label': '通知'}}]}]}, {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextField', 'props': {'model': 'monitor_path', 'label': '监控路径'}}]}, {'component': 'VCol', 'props': {'cols': 12}, 'content': [{'component': 'VTextField', 'props': {'model': 'target_path', 'label': '目标路径'}}]}]}, {'component': 'VRow', 'content': [{'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VCronField', 'props': {'model': 'cron', 'label': '周期'}}]}, {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [{'component': 'VTextField', 'props': {'model': 'threshold', 'label': '阈值(MB)'}}]}]}]}], {"enabled": False, "notify": True, "threshold": 500, "cron": "*/30 * * * *"}
 
     def get_command(self) -> List[Dict[str, Any]]:
-        return [{"command": "run_115_clean", "data": "run_115_clean", "description": "立即整理 115", "handler": self.execute}]
+        return [{"command": "run_115", "data": "run_115", "description": "手动执行", "handler": self.execute}]
 
     def stop_service(self):
         pass

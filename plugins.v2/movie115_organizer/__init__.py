@@ -1,4 +1,4 @@
-import inspect
+from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,7 +14,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径。"
     plugin_icon = "Folder"
-    plugin_version = "1.4.3"
+    plugin_version = "1.4.4"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -64,14 +64,6 @@ class movie115_organizer(_PluginBase):
         try:
             from app.modules.filemanager.storages.u115 import U115Pan
             inst = U115Pan()
-            # 打印 move 方法的真实签名
-            try:
-                sig = inspect.signature(inst.move)
-                logger.info(f"【115整理】U115Pan.move 签名: {sig}")
-                src = inspect.getsource(inst.move)
-                logger.info(f"【115整理】U115Pan.move 源码:\n{src[:600]}")
-            except Exception as e:
-                logger.info(f"【115整理】无法读取 move 签名/源码: {e}")
             movie115_organizer._u115_inst = inst
             return inst
         except Exception as e:
@@ -132,6 +124,7 @@ class movie115_organizer(_PluginBase):
         threshold_bytes = self._size_threshold_mb * 1024 * 1024
         logger.info(f"【115整理】>>> 开始处理: {fname}")
 
+        # Step 1: 列出文件
         files = storage.list_files(folder) or []
         all_files = [f for f in files if f.type == "file"]
         logger.info(f"【115整理】[{fname}] {len(all_files)} 个文件: {[(f.name, self._fmt(f.size)) for f in all_files]}")
@@ -139,6 +132,7 @@ class movie115_organizer(_PluginBase):
             logger.info(f"【115整理】[{fname}] 为空（下载中），跳过")
             return False
 
+        # Step 2: 删除小文件
         small = [f for f in all_files if (f.size or 0) < threshold_bytes]
         large = [f for f in all_files if (f.size or 0) >= threshold_bytes]
         logger.info(f"【115整理】[{fname}] 阈值{self._size_threshold_mb}MB → 小{len(small)}个 大{len(large)}个")
@@ -149,6 +143,7 @@ class movie115_organizer(_PluginBase):
             except Exception as e:
                 logger.error(f"【115整理】[{fname}] 删除异常: {e}", exc_info=True)
 
+        # Step 3: 确认无残留
         files_after = storage.list_files(folder) or []
         remaining = [f for f in files_after if f.type == "file"]
         still_small = [f for f in remaining if (f.size or 0) < threshold_bytes]
@@ -160,6 +155,7 @@ class movie115_organizer(_PluginBase):
             logger.warning(f"【115整理】[{fname}] 小文件未删完，跳过")
             return False
 
+        # Step 4: 重命名文件（去 @ 前缀）
         for bf in [f for f in remaining if (f.size or 0) >= threshold_bytes]:
             if "@" in bf.name:
                 new_fname = bf.name.split("@")[-1]
@@ -170,140 +166,40 @@ class movie115_organizer(_PluginBase):
                 except Exception as e:
                     logger.error(f"【115整理】[{fname}] 重命名异常: {e}", exc_info=True)
 
+        # Step 5: 移动文件夹
         target_path = self._target_path.rstrip("/")
-        target_item = self._get_fileitem(storage, target_path)
-        if not target_item:
-            logger.error(f"【115整理】[{fname}] 无法获取目标路径: {target_path}")
-            return False
-
         logger.info(f"【115整理】[{fname}] 开始移动 → {target_path}")
-        ok = self._do_move(folder, target_item)
+        ok = self._do_move(folder, target_path)
         logger.info(f"【115整理】[{fname}] 移动结果: {'✅成功' if ok else '❌失败'}")
         return ok
 
     # ═══════════════════════════════════════════════════════════
-    #  移动：三种方案
+    #  移动：正确调用 U115Pan.move(fileitem, Path, new_name)
     # ═══════════════════════════════════════════════════════════
 
-    def _do_move(self, src: FileItem, dst: FileItem) -> bool:
-        src_id = getattr(src, "fileid", None)
-        dst_id = getattr(dst, "fileid", None)
-        logger.info(f"【115整理】move: src_id={src_id} dst_id={dst_id}")
-
+    def _do_move(self, src: FileItem, target_path: str) -> bool:
+        """
+        U115Pan.move 签名（已确认）:
+            move(self, fileitem: FileItem, path: Path, new_name: str) -> bool
+        其中：
+            fileitem  = 要移动的源 FileItem
+            path      = 目标目录的 Path（用 pathlib.Path）
+            new_name  = 移动后保持原名不变，传 src.name 即可
+        """
         u115 = self._get_u115()
+        if u115 is None:
+            logger.error("【115整理】无法获取 U115Pan 实例")
+            return False
 
-        # ── 方案1：用 inspect 读取 move 签名后正确调用 ─────────
-        if u115 is not None and hasattr(u115, "move"):
-            try:
-                sig = inspect.signature(u115.move)
-                params = list(sig.parameters.keys())
-                logger.info(f"【115整理】方案1: U115Pan.move 参数列表={params}")
-
-                # 根据参数名猜测正确的调用方式
-                # 常见形式: move(file_item, target) / move(fileids, pid) / move(src_fileid, dst_fileid)
-                if len(params) == 1:
-                    # 可能只有一个参数，是 fileitem
-                    result = u115.move(src)
-                elif len(params) == 2:
-                    p0, p1 = params[0], params[1]
-                    if "item" in p0 or "file" in p0.lower():
-                        result = u115.move(src, dst)
-                    elif "id" in p0 or "cid" in p0 or "pid" in p1:
-                        result = u115.move(src_id, dst_id)
-                    else:
-                        # 都试一遍
-                        result = None
-                        for args in ((src, dst), (src_id, dst_id), ([src_id], dst_id)):
-                            try:
-                                result = u115.move(*args)
-                                logger.info(f"【115整理】方案1 move{args} 结果: {result}")
-                                break
-                            except TypeError:
-                                continue
-                else:
-                    result = None
-
-                logger.info(f"【115整理】方案1 结果: {result}")
-                if result not in (None, False):
-                    return True
-                if isinstance(result, dict) and result.get("state"):
-                    return True
-
-            except Exception as e:
-                logger.warning(f"【115整理】方案1异常: {e}", exc_info=True)
-
-        # ── 方案2：用 U115Pan 内置 session(httpx.Client) 调 OpenAPI ──
-        # session 已配置好 Bearer token，直接调即可
-        logger.info("【115整理】方案2: 用 U115Pan.session 调 OpenAPI")
-        if u115 is not None:
-            session = getattr(u115, "session", None)
-            base_url = getattr(u115, "base_url", "https://proapi.115.com")
-            if session is not None:
-                # 115 OpenAPI 移动文件夹接口候选
-                endpoints = [
-                    "/open/folder/move",
-                    "/open/files/move",
-                    "/open/ufile/move",
-                ]
-                for ep in endpoints:
-                    url = f"{base_url}{ep}"
-                    # 参数形式1：file_ids[]=xxx&pid=yyy
-                    payloads = [
-                        {"file_ids[]": src_id, "pid": dst_id},
-                        {"fid[]": src_id, "pid": dst_id},
-                        {"file_id": src_id, "pid": dst_id},
-                        {"cid": src_id, "pid": dst_id},
-                    ]
-                    for payload in payloads:
-                        try:
-                            logger.info(f"【115整理】POST {url} data={payload}")
-                            resp = session.post(url, data=payload, timeout=15)
-                            rj = resp.json()
-                            logger.info(f"【115整理】响应: {rj}")
-                            if rj.get("state") is True or rj.get("errno") == 0:
-                                logger.info(f"【115整理】方案2成功: {ep}")
-                                return True
-                            # errno 非0 且不是404，说明接口存在但参数错，继续试其他 payload
-                            if rj.get("errno") not in (None, 404, 10004, 20130827):
-                                break  # 接口正确，但操作失败，不必换 payload
-                        except Exception as e:
-                            logger.warning(f"【115整理】POST {url} {payload} 异常: {e}")
-
-        # ── 方案3：用 access_token 直接 requests 调 OpenAPI ───
-        logger.info("【115整理】方案3: requests + Bearer token 调 OpenAPI")
-        if u115 is not None:
-            token = getattr(u115, "access_token", None)
-            base_url = getattr(u115, "base_url", "https://proapi.115.com")
-            if token:
-                import requests
-                headers = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                }
-                endpoints = ["/open/folder/move", "/open/files/move", "/open/ufile/move"]
-                payloads = [
-                    {"file_ids[]": src_id, "pid": dst_id},
-                    {"fid[]": src_id, "pid": dst_id},
-                    {"file_id": src_id, "pid": dst_id},
-                ]
-                for ep in endpoints:
-                    for payload in payloads:
-                        try:
-                            url = f"{base_url}{ep}"
-                            logger.info(f"【115整理】方案3 POST {url} data={payload}")
-                            resp = requests.post(url, data=payload, headers=headers, timeout=15)
-                            rj = resp.json()
-                            logger.info(f"【115整理】方案3 响应: {rj}")
-                            if rj.get("state") is True or rj.get("errno") == 0:
-                                logger.info(f"【115整理】方案3成功: {ep}")
-                                return True
-                            if rj.get("errno") not in (None, 404, 10004):
-                                break
-                        except Exception as e:
-                            logger.warning(f"【115整理】方案3 POST {ep} 异常: {e}")
-
-        logger.error("【115整理】所有移动方案均失败")
-        return False
+        dst_path = Path(target_path)
+        logger.info(f"【115整理】调用 U115Pan.move(fileitem={src.name}, path={dst_path}, new_name={src.name})")
+        try:
+            ok = u115.move(src, dst_path, src.name)
+            logger.info(f"【115整理】U115Pan.move 返回: {ok}")
+            return bool(ok)
+        except Exception as e:
+            logger.error(f"【115整理】U115Pan.move 异常: {e}", exc_info=True)
+            return False
 
     # ═══════════════════════════════════════════════════════════
     #  工具方法

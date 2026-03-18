@@ -17,7 +17,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径，并生成STRM文件。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.4.5"
+    plugin_version = "1.4.6"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1

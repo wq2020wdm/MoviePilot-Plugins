@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115路径，自动清理小文件、按@符号重命名并移动归档。"
-    plugin_icon = "" 
+    plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png" 
     plugin_version = "1.2.6"
     plugin_author = "YourName"
     plugin_order = 10

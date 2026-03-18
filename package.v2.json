@@ -3,7 +3,7 @@
     "name": "115 目录洗白整理",
     "description": "监控115路径，自动清理小文件、按@符号重命名并移动归档。",
     "labels": "工具,网盘",
-    "version": "1.2.8",
+    "version": "1.2.9",
     "icon": "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png",
     "author": "wq2020wdm",
     "level": 1

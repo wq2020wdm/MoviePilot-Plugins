@@ -1,10 +1,10 @@
 {
   "movie115_organizer": {
-    "name": "115 目录洗白整理",
-    "description": "监控115路径，自动清理小文件、按@符号重命名并移动归档。",
+    "name": "115 目录洗白整理 (OpenAPI 版)",
+    "description": "监控115路径，自动清理小文件、按@符号重命名并移动归档。已适配 V2 架构。",
     "labels": "工具,网盘",
-    "version": "1.2.9",
-    "icon": "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png",
+    "version": "1.3.0",
+    "icon": "Folder",
     "author": "wq2020wdm",
     "level": 1
   }

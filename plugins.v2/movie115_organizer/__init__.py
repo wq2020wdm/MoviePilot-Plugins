@@ -15,16 +15,17 @@ def get_p115_helper():
     return None
 
 class movie115_organizer(_PluginBase):
-    # --- V2 插件元数据 (必须与文件夹名和 package.v2.json 的 Key 完全一致) ---
+    # --- V2 插件元数据 ---
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115路径，自动清理小文件、按@符号重命名并移动归档。"
-    plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png" # 留空则使用默认图标
-    plugin_version = "1.2.5"
+    plugin_icon = "" 
+    plugin_version = "1.2.6"
     plugin_author = "YourName"
     plugin_order = 10
     auth_level = 1
 
+    # 配置变量
     _enabled = False
     _cron = None
     _monitor_path = None
@@ -43,6 +44,22 @@ class movie115_organizer(_PluginBase):
             except:
                 self._threshold = 500
             self._notify = config.get("notify")
+
+    # --- V2 必须实现的抽象方法 (修复报错的关键) ---
+    
+    def get_state(self) -> bool:
+        """返回插件运行状态"""
+        return self._enabled
+
+    def get_page(self) -> List[dict]:
+        """返回自定义页面配置，V2 必须实现，暂不使用则返回空列表"""
+        return []
+
+    def get_api(self) -> List[dict]:
+        """返回插件自定义 API，V2 必须实现，暂不使用则返回空列表"""
+        return []
+
+    # --- 核心逻辑 ---
 
     def get_id_by_path(self, p115, path: str):
         if not path: return None

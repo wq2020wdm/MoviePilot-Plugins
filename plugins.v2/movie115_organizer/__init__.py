@@ -17,7 +17,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径，并生成STRM文件。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.4.6"
+    plugin_version = "1.4.7"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -32,7 +32,6 @@ class movie115_organizer(_PluginBase):
     _size_threshold_mb: int = 500
     _notify: bool = True
     _run_once: bool = False
-    # STRM 相关
     _strm_enabled: bool = False
     _strm_local_path: str = ""
     _strm_template: str = "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}"
@@ -66,7 +65,207 @@ class movie115_organizer(_PluginBase):
         pass
 
     # ═══════════════════════════════════════════════════════════
-    #  Telegram Bot 命令注册（v2 标准格式）
+    #  详情页（默认打开页）
+    # ═══════════════════════════════════════════════════════════
+
+    def get_page(self) -> List[dict]:
+        """返回插件详情页，默认打开时展示。"""
+        # 状态徽章
+        status_color = "success" if self._enabled else "default"
+        status_text  = "运行中" if self._enabled else "已停用"
+        strm_text    = "已开启" if self._strm_enabled else "未开启"
+
+        # 监控目录列表
+        monitor_list = [p.strip() for p in self._monitor_paths.splitlines() if p.strip()]
+
+        monitor_chips = []
+        for p in monitor_list:
+            monitor_chips.append({
+                "component": "VChip",
+                "props": {"class": "ma-1", "size": "small", "color": "primary", "variant": "tonal"},
+                "text": p
+            })
+        if not monitor_chips:
+            monitor_chips = [{"component": "span", "props": {"class": "text-caption text-disabled"},
+                               "text": "未配置"}]
+
+        return [
+            {
+                "component": "VRow",
+                "content": [
+                    # ── 左侧：状态卡片 ────────────────────────
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "md": 4},
+                        "content": [
+                            {
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "class": "mb-3"},
+                                "content": [
+                                    {
+                                        "component": "VCardText",
+                                        "content": [
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "d-flex align-center justify-space-between mb-2"},
+                                                "content": [
+                                                    {"component": "span", "props": {"class": "text-subtitle-2"},
+                                                     "text": "插件状态"},
+                                                    {"component": "VChip",
+                                                     "props": {"color": status_color, "size": "small", "label": True},
+                                                     "text": status_text},
+                                                ]
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "d-flex align-center justify-space-between mb-2"},
+                                                "content": [
+                                                    {"component": "span", "props": {"class": "text-caption text-medium-emphasis"},
+                                                     "text": "Cron 计划"},
+                                                    {"component": "span", "props": {"class": "text-caption font-weight-bold"},
+                                                     "text": self._cron or "未设置"},
+                                                ]
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "d-flex align-center justify-space-between mb-2"},
+                                                "content": [
+                                                    {"component": "span", "props": {"class": "text-caption text-medium-emphasis"},
+                                                     "text": "垃圾文件阈值"},
+                                                    {"component": "span", "props": {"class": "text-caption font-weight-bold"},
+                                                     "text": f"{self._size_threshold_mb} MB"},
+                                                ]
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "d-flex align-center justify-space-between mb-2"},
+                                                "content": [
+                                                    {"component": "span", "props": {"class": "text-caption text-medium-emphasis"},
+                                                     "text": "STRM 生成"},
+                                                    {"component": "VChip",
+                                                     "props": {
+                                                         "color": "success" if self._strm_enabled else "default",
+                                                         "size": "x-small", "label": True
+                                                     },
+                                                     "text": strm_text},
+                                                ]
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "d-flex align-center justify-space-between"},
+                                                "content": [
+                                                    {"component": "span", "props": {"class": "text-caption text-medium-emphasis"},
+                                                     "text": "发送通知"},
+                                                    {"component": "VChip",
+                                                     "props": {
+                                                         "color": "success" if self._notify else "default",
+                                                         "size": "x-small", "label": True
+                                                     },
+                                                     "text": "是" if self._notify else "否"},
+                                                ]
+                                            },
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    # ── 右侧：路径信息 ────────────────────────
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "md": 8},
+                        "content": [
+                            {
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "class": "mb-3"},
+                                "content": [
+                                    {
+                                        "component": "VCardText",
+                                        "content": [
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "mb-3"},
+                                                "content": [
+                                                    {"component": "div",
+                                                     "props": {"class": "text-subtitle-2 mb-1"},
+                                                     "text": "📂 监控目录"},
+                                                    {
+                                                        "component": "div",
+                                                        "props": {"class": "d-flex flex-wrap"},
+                                                        "content": monitor_chips
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                "component": "VDivider",
+                                                "props": {"class": "my-2"}
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "mb-3"},
+                                                "content": [
+                                                    {"component": "div",
+                                                     "props": {"class": "text-subtitle-2 mb-1"},
+                                                     "text": "📁 移动目标路径"},
+                                                    {"component": "span",
+                                                     "props": {"class": "text-caption"},
+                                                     "text": self._target_path or "未配置"}
+                                                ]
+                                            },
+                                            {
+                                                "component": "VDivider",
+                                                "props": {"class": "my-2"}
+                                            },
+                                            {
+                                                "component": "div",
+                                                "content": [
+                                                    {"component": "div",
+                                                     "props": {"class": "text-subtitle-2 mb-1"},
+                                                     "text": "🎬 STRM 本地根目录"},
+                                                    {"component": "span",
+                                                     "props": {"class": "text-caption"},
+                                                     "text": self._strm_local_path or "未配置"}
+                                                ]
+                                            },
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                ]
+            },
+            # ── 说明提示 ──────────────────────────────────────
+            {
+                "component": "VRow",
+                "content": [
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "density": "compact",
+                                    "text": (
+                                        "💡 使用说明：\n"
+                                        "① 点击右下角 ⚙️ 齿轮图标进入配置页设置参数\n"
+                                        "② Telegram Bot 发送 /run_115_clean 可立即触发整理\n"
+                                        "③ 流程：扫描子文件夹 → 删除垃圾文件 → 重命名(去@前缀) → 移动到目标路径 → 生成STRM\n"
+                                        "④ 移动若遇到限速(770004)属正常现象，等待后重试即可"
+                                    )
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+
+    # ═══════════════════════════════════════════════════════════
+    #  Telegram Bot 命令
     # ═══════════════════════════════════════════════════════════
 
     def get_command(self) -> List[Dict[str, Any]]:
@@ -82,7 +281,6 @@ class movie115_organizer(_PluginBase):
 
     @eventmanager.register(EventType.PluginAction)
     def handle_command(self, event: Event):
-        """响应 Telegram Bot /run_115_clean 指令"""
         if not event or not event.event_data:
             return
         if event.event_data.get("action") != "run_115_clean":
@@ -166,7 +364,6 @@ class movie115_organizer(_PluginBase):
         threshold_bytes = self._size_threshold_mb * 1024 * 1024
         logger.info(f"【115整理】>>> 开始处理: {fname}")
 
-        # Step 1: 列出文件
         files = storage.list_files(folder) or []
         all_files = [f for f in files if f.type == "file"]
         logger.info(f"【115整理】[{fname}] {len(all_files)} 个文件: {[(f.name, self._fmt(f.size)) for f in all_files]}")
@@ -174,7 +371,6 @@ class movie115_organizer(_PluginBase):
             logger.info(f"【115整理】[{fname}] 为空（下载中），跳过")
             return False
 
-        # Step 2: 删除小文件
         small = [f for f in all_files if (f.size or 0) < threshold_bytes]
         large = [f for f in all_files if (f.size or 0) >= threshold_bytes]
         logger.info(f"【115整理】[{fname}] 阈值{self._size_threshold_mb}MB → 小{len(small)}个 大{len(large)}个")
@@ -185,7 +381,6 @@ class movie115_organizer(_PluginBase):
             except Exception as e:
                 logger.error(f"【115整理】[{fname}] 删除异常: {e}", exc_info=True)
 
-        # Step 3: 确认无残留
         files_after = storage.list_files(folder) or []
         remaining = [f for f in files_after if f.type == "file"]
         still_small = [f for f in remaining if (f.size or 0) < threshold_bytes]
@@ -197,12 +392,9 @@ class movie115_organizer(_PluginBase):
             logger.warning(f"【115整理】[{fname}] 小文件未删完，跳过")
             return False
 
-        # Step 4: 重命名大文件（去 @ 前缀），同时记录 pickcode
-        big_files = [f for f in remaining if (f.size or 0) >= threshold_bytes]
-        # 用于后续生成 STRM，记录(最终文件名, pickcode)
+        # 重命名大文件，记录 (最终文件名, pickcode)
         strm_targets: List[Tuple[str, str]] = []
-
-        for bf in big_files:
+        for bf in [f for f in remaining if (f.size or 0) >= threshold_bytes]:
             pickcode = getattr(bf, "pickcode", None) or ""
             if "@" in bf.name:
                 new_fname = bf.name.split("@")[-1]
@@ -210,17 +402,14 @@ class movie115_organizer(_PluginBase):
                 try:
                     ok = storage.rename_file(bf, new_fname)
                     logger.info(f"【115整理】[{fname}] 重命名{'成功' if ok else '失败'}")
-                    if ok:
-                        strm_targets.append((new_fname, pickcode))
-                    else:
-                        strm_targets.append((bf.name, pickcode))
+                    strm_targets.append((new_fname if ok else bf.name, pickcode))
                 except Exception as e:
                     logger.error(f"【115整理】[{fname}] 重命名异常: {e}", exc_info=True)
                     strm_targets.append((bf.name, pickcode))
             else:
                 strm_targets.append((bf.name, pickcode))
 
-        # Step 5: 移动文件夹
+        # 移动
         target_path = self._target_path.rstrip("/")
         logger.info(f"【115整理】[{fname}] 开始移动 → {target_path}")
         ok = self._do_move(folder, target_path)
@@ -228,7 +417,7 @@ class movie115_organizer(_PluginBase):
         if not ok:
             return False
 
-        # Step 6: 生成 STRM 文件
+        # 生成 STRM
         if self._strm_enabled and self._strm_local_path.strip():
             for file_name, pickcode in strm_targets:
                 self._generate_strm(fname, file_name, pickcode, target_path)
@@ -241,47 +430,30 @@ class movie115_organizer(_PluginBase):
 
     def _generate_strm(self, folder_name: str, file_name: str,
                        pickcode: str, cloud_target_path: str):
-        """
-        在本地路径下创建同名文件夹，生成 .strm 文件。
-        cloud_file = {cloud_target_path}/{folder_name}/{file_name}
-        """
         try:
-            # 本地目录：strm_local_path / folder_name
             local_dir = Path(self._strm_local_path.rstrip("/")) / folder_name
             local_dir.mkdir(parents=True, exist_ok=True)
-
-            # strm 文件名：去掉原始扩展名，换成 .strm
             stem = Path(file_name).stem
             strm_file = local_dir / f"{stem}.strm"
-
-            # 云端完整路径（URL 编码中保持原样）
             cloud_file = f"{cloud_target_path}/{folder_name}/{file_name}"
-
-            # 替换模板中的占位符
             content = (self._strm_template
                        .replace("{cloud_file}", cloud_file)
                        .replace("{pick_code}", pickcode))
-
             strm_file.write_text(content, encoding="utf-8")
-            logger.info(f"【115整理】STRM 生成成功: {strm_file}  内容: {content}")
-
+            logger.info(f"【115整理】STRM 生成成功: {strm_file}")
+            logger.info(f"【115整理】STRM 内容: {content}")
         except Exception as e:
             logger.error(f"【115整理】STRM 生成失败 ({folder_name}/{file_name}): {e}", exc_info=True)
 
     # ═══════════════════════════════════════════════════════════
-    #  移动：正确调用 U115Pan.move(fileitem, Path, new_name)
+    #  移动
     # ═══════════════════════════════════════════════════════════
 
     def _do_move(self, src: FileItem, target_path: str) -> bool:
-        """
-        U115Pan.move 签名（已通过日志确认）:
-            move(self, fileitem: FileItem, path: Path, new_name: str) -> bool
-        """
         u115 = self._get_u115()
         if u115 is None:
             logger.error("【115整理】无法获取 U115Pan 实例")
             return False
-
         dst_path = Path(target_path)
         logger.info(f"【115整理】U115Pan.move({src.name!r}, {dst_path}, {src.name!r})")
         try:
@@ -351,7 +523,6 @@ class movie115_organizer(_PluginBase):
     # ═══════════════════════════════════════════════════════════
 
     def get_api(self) -> List[dict]: return []
-    def get_page(self) -> List[dict]: return []
 
     def get_service(self) -> List[Dict[str, Any]]:
         if self._enabled and self._cron:
@@ -369,7 +540,6 @@ class movie115_organizer(_PluginBase):
             {
                 "component": "VForm",
                 "content": [
-                    # ── 行1: 基础开关 ──────────────────────────
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                             {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
@@ -380,17 +550,14 @@ class movie115_organizer(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                             {"component": "VSwitch", "props": {"model": "run_once", "label": "保存后运行一次"}}]},
                     ]},
-                    # ── 行2: Cron + 阈值 ───────────────────────
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VTextField", "props": {"model": "cron", "label": "Cron 表达式",
                                 "hint": "建议间隔≥30分钟，如 0 */2 * * *"}}]},
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                             {"component": "VTextField", "props": {"model": "size_threshold_mb",
-                                "label": "垃圾文件阈值 (MB)", "type": "number",
-                                "hint": "小于此值的文件视为广告/预告片并删除"}}]},
+                                "label": "垃圾文件阈值 (MB)", "type": "number"}}]},
                     ]},
-                    # ── 行3: 监控目录 ──────────────────────────
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VTextarea", "props": {"model": "monitor_paths",
@@ -398,30 +565,24 @@ class movie115_organizer(_PluginBase):
                                 "placeholder": "/CloudNAS/temp/小姐姐",
                                 "rows": 3}}]},
                     ]},
-                    # ── 行4: 目标路径 ──────────────────────────
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VTextField", "props": {"model": "target_path",
                                 "label": "115 移动目标路径",
-                                "placeholder": "/CloudNAS/电影",
-                                "hint": "洗白后的文件夹将移动到此路径"}}]},
+                                "placeholder": "/CloudNAS/电影"}}]},
                     ]},
-                    # ── 行5: STRM 本地路径 ─────────────────────
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VTextField", "props": {"model": "strm_local_path",
                                 "label": "STRM 本地根目录（需开启生成STRM）",
-                                "placeholder": "/media/strm/电影",
-                                "hint": "在此路径下创建同名文件夹并生成 .strm 文件"}}]},
+                                "placeholder": "/media/strm/电影"}}]},
                     ]},
-                    # ── 行6: STRM 模板 ─────────────────────────
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VTextField", "props": {"model": "strm_template",
                                 "label": "STRM 内容模板",
-                                "hint": "可用占位符: {cloud_file}=云端完整路径, {pick_code}=115 pickcode"}}]},
+                                "hint": "{cloud_file}=云端完整路径  {pick_code}=115 pickcode"}}]},
                     ]},
-                    # ── 说明 ───────────────────────────────────
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VAlert", "props": {
@@ -430,8 +591,7 @@ class movie115_organizer(_PluginBase):
                                     "流程：扫描监控目录子文件夹 → 删除小于阈值的垃圾文件 → "
                                     "大文件名含@则去除@前缀重命名 → 移动整个文件夹到目标路径 → "
                                     "（可选）在本地生成 .strm 文件。\n"
-                                    "Telegram Bot 指令：/run_115_clean  可立即触发整理。\n"
-                                    "注意：移动操作可能受115 API限速(code 770004)，稍等后重试即可。"
+                                    "Telegram Bot 指令：/run_115_clean  可立即触发整理。"
                                 )}}],
                         },
                     ]},

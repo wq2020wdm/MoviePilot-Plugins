@@ -9,9 +9,9 @@ class movie115_organizer(_PluginBase):
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理 (OpenAPI 兼容版)"
     plugin_desc = "已适配 V2，通过系统 API 调度整理任务。"
-    plugin_icon = "Folder" 
+    plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png" 
     plugin_version = "1.3.0"
-    plugin_author = "YourName"
+    plugin_author = "wq2020wdm"
     auth_level = 1
 
     _enabled = False

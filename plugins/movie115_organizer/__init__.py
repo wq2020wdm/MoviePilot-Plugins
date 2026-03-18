@@ -1,159 +1,180 @@
 import time
+from typing import List, Dict, Tuple, Any, Optional
 from app.plugins import _PluginBase
-from app.modules.p115 import P115Helper
-from app.core.config import settings
+from app.log import logger
+from app.schemas import NotificationType
+# 注意：V2 的 115 助手路径通常在 app.helper.p115 或 app.modules.p115
+try:
+    from app.helper.p115 import P115Helper
+except ImportError:
+    from app.modules.p115 import P115Helper
 
 class Movie115Organizer(_PluginBase):
-    # --- 插件元数据 (替代 config.json) ---
-    plugin_id = "movie115_organizer"
+    # --- 插件元数据 ---
     plugin_name = "115 目录洗白整理"
-    plugin_desc = "监控115路径，自动清理小文件，按@符号重命名并移动归档。"
-    plugin_icon = "folder.png"
-    plugin_order = 15
-    auth_group = "admin"
+    plugin_desc = "监控115路径，自动清理小文件并重命名移动。"
+    plugin_icon = "folder.png" # 确保这个图标在 MP 中存在或使用通用图标
+    plugin_version = "1.0.0"
+    plugin_author = "YourName"
+    plugin_order = 20
+    auth_level = 1
 
-    def get_fields(self):
-        """定义 MoviePilot 界面上的输入框"""
-        return [
-            {
-                'component': 'VSwitch',
-                'prop': {
-                    'label': '启用插件',
-                },
-                'name': 'enabled'
-            },
-            {
-                'component': 'VTextField',
-                'prop': {
-                    'label': '定时任务 (Cron)',
-                    'placeholder': '例如: */30 * * * * (每30分钟运行一次)'
-                },
-                'name': 'cron'
-            },
-            {
-                'component': 'VTextField',
-                'prop': {
-                    'label': '监控路径或ID',
-                    'placeholder': '例如: /我的网盘/下载 或 115数字ID'
-                },
-                'name': 'monitor_path'
-            },
-            {
-                'component': 'VTextField',
-                'prop': {
-                    'label': '目标保存路径或ID',
-                    'placeholder': '例如: /我的网盘/电影 或 115数字ID'
-                },
-                'name': 'target_path'
-            },
-            {
-                'component': 'VTextField',
-                'prop': {
-                    'label': '体积阈值 (MB)',
-                    'placeholder': '小于此大小的文件将被删除'
-                },
-                'name': 'threshold',
-                'default': '500'
-            },
-            {
-                'component': 'VSwitch',
-                'prop': {
-                    'label': '启用通知',
-                },
-                'name': 'notify'
-            }
-        ]
+    # 私有属性存储配置
+    _enabled = False
+    _cron = None
+    _monitor_path = None
+    _target_path = None
+    _threshold = 500
+    _notify = True
+
+    def init_plugin(self, config: dict = None):
+        """初始化配置"""
+        if config:
+            self._enabled = config.get("enabled")
+            self._cron = config.get("cron")
+            self._monitor_path = config.get("monitor_path")
+            self._target_path = config.get("target_path")
+            self._threshold = float(config.get("threshold") or 500)
+            self._notify = config.get("notify")
 
     def get_id_by_path(self, p115, path: str):
-        """路径转 ID 逻辑：递归查找路径对应的 115 ID"""
+        """路径转 ID 逻辑"""
         if not path: return None
-        if not path.startswith('/'): return path # 已经是 ID 格式
+        if not path.startswith('/'): return path
         
         parts = [p for p in path.split('/') if p]
-        current_id = '0' # 115 根目录
+        current_id = '0'
         for part in parts:
             found = False
             items = p115.get_file_list(current_id)
+            if not items: break
             for item in items:
                 if item.get('is_dir') and item.get('name') == part:
                     current_id = item.get('id')
                     found = True
                     break
-            if not found:
-                self.log_error(f"115 路径未找到: {part}")
-                return None
+            if not found: return None
         return current_id
 
     def execute(self):
-        """插件主逻辑"""
-        config = self.get_config()
-        if not config.get('enabled'):
-            self.log_info("插件未启用")
+        """主执行逻辑"""
+        if not self._enabled:
             return
-
-        m_path = config.get('monitor_path')
-        t_path = config.get('target_path')
-        threshold = float(config.get('threshold') or 500)
 
         p115 = P115Helper()
-        
-        # 1. 路径预解析
-        m_id = self.get_id_by_path(p115, m_path)
-        t_id = self.get_id_by_path(p115, t_path)
+        m_id = self.get_id_by_path(p115, self._monitor_path)
+        t_id = self.get_id_by_path(p115, self._target_path)
 
         if not m_id or not t_id:
-            self.log_error("无法获取有效的监控或目标目录 ID")
+            logger.error(f"【115整理】路径转换失败，请检查配置")
             return
 
-        self.log_info(f"开始执行 115 扫描任务，监控 ID: {m_id}")
-
         try:
-            # 2. 获取列表
             items = p115.get_file_list(m_id)
             for item in items:
-                if not item.get('is_dir'): continue # 只处理目录
+                if not item.get('is_dir'): continue
                 
                 folder_id = item.get('id')
                 folder_name = item.get('name')
                 
-                # 3. 清理小文件
+                # 清理小文件
                 sub_files = p115.get_file_list(folder_id)
                 for sf in sub_files:
                     if not sf.get('is_dir'):
                         size_mb = sf.get('size', 0) / (1024 * 1024)
-                        if size_mb < threshold:
+                        if size_mb < self._threshold:
                             p115.delete_file(sf.get('id'))
-                            self.log_info(f"[{folder_name}] 已删除广告/小文件: {sf.get('name')}")
+                            logger.info(f"【115整理】已删除广告文件: {sf.get('name')}")
 
-                # 4. 重命名逻辑 (删除 @ 符号及以前的部分)
+                # 重命名
                 new_name = folder_name
                 if '@' in folder_name:
                     new_name = folder_name.split('@')[-1]
                     if new_name != folder_name:
                         p115.rename_file(folder_id, new_name)
-                        self.log_info(f"文件夹重命名: {folder_name} -> {new_name}")
 
-                # 5. 移动
+                # 移动
                 p115.move_file(folder_id, t_id)
-                self.log_info(f"任务归档成功: {new_name}")
+                logger.info(f"【115整理】已成功移动: {new_name}")
 
-                # 6. 通知
-                if config.get('notify'):
-                    self.post_message(title="115 自动整理报告", text=f"已成功洗白并移动文件夹: {new_name}")
-
+                if self._notify:
+                    self.post_message(
+                        mtype=NotificationType.SiteMessage,
+                        title="115 目录整理完成",
+                        text=f"处理并归档: {new_name}"
+                    )
         except Exception as e:
-            self.log_error(f"执行过程中发生异常: {str(e)}")
+            logger.error(f"【115整理】运行异常: {str(e)}")
 
-    def get_command(self):
-        """注册 Telegram Bot 命令"""
+    def get_service(self) -> List[Dict[str, Any]]:
+        """注册定时服务 (Cron)"""
+        if self._enabled and self._cron:
+            from apscheduler.triggers.cron import CronTrigger
+            return [{
+                "id": "Movie115Organizer",
+                "name": "115 整理定时服务",
+                "trigger": CronTrigger.from_crontab(self._cron),
+                "func": self.execute,
+                "kwargs": {}
+            }]
+        return []
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """构建 V2 版本的表单界面"""
         return [
             {
-                "command": "run_115_clean",
-                "data": "run_115_clean",
-                "description": "立即运行 115 洗白整理任务",
-                "handler": self.execute
+                'component': 'VForm',
+                'content': [
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
+                                {'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}
+                            ]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
+                                {'component': 'VSwitch', 'props': {'model': 'notify', 'label': '开启通知'}}
+                            ]}
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
+                                {'component': 'VTextField', 'props': {'model': 'monitor_path', 'label': '监控路径或ID'}}
+                            ]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
+                                {'component': 'VTextField', 'props': {'model': 'target_path', 'label': '目标路径或ID'}}
+                            ]}
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
+                                {'component': 'VCronField', 'props': {'model': 'cron', 'label': '运行周期'}}
+                            ]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
+                                {'component': 'VTextField', 'props': {'model': 'threshold', 'label': '体积阈值 (MB)'}}
+                            ]}
+                        ]
+                    }
+                ]
             }
-        ]
+        ], {
+            "enabled": False,
+            "notify": True,
+            "threshold": 500,
+            "cron": "*/30 * * * *"
+        }
+
+    def get_command(self) -> List[Dict[str, Any]]:
+        """注册 Bot 命令"""
+        return [{
+            "command": "run_115_clean",
+            "data": "run_115_clean",
+            "description": "立即运行 115 洗白整理",
+            "handler": self.execute
+        }]
 
     def stop_service(self):
         pass

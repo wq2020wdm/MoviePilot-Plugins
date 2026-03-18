@@ -12,15 +12,14 @@ from app.schemas.file import FileItem
 class movie115_organizer(_PluginBase):
     # ── 插件元信息 ──────────────────────────────────────────────
     plugin_id = "movie115_organizer"
-    plugin_name = "115 目录洗白整理"
+    plugin_name = "115目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径。"
     plugin_icon = "Folder" 
-    plugin_version = "1.3.3"
+    plugin_version = "1.3.4"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
 
-    # ── 运行时状态 ──────────────────────────────────────────────
     _lock = Lock()
 
     # ── 配置项 ──────────────────────────────────────────────────
@@ -47,9 +46,10 @@ class movie115_organizer(_PluginBase):
 
         if self._run_once:
             self._run_once = False
-            # 重置 run_once 开关
             self.update_config({"run_once": False, **self._current_config()})
-            self.execute()
+            # 异步执行，防止阻塞 UI
+            import threading
+            threading.Thread(target=self.execute, daemon=True).start()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -62,27 +62,23 @@ class movie115_organizer(_PluginBase):
     # ═══════════════════════════════════════════════════════════
 
     def execute(self, **kwargs):
-        """主流程：扫描所有监控目录下的子文件夹，依次洗白。"""
         if not self._lock.acquire(blocking=False):
             logger.warning("【115整理】上次任务尚未完成，跳过本次执行")
             return
         try:
             paths = [p.strip() for p in self._monitor_paths.splitlines() if p.strip()]
-            if not paths:
-                logger.warning("【115整理】未配置监控路径，跳过")
-                return
-            if not self._target_path.strip():
-                logger.warning("【115整理】未配置目标路径，跳过")
+            if not paths or not self._target_path.strip():
+                logger.warning("【115整理】配置不完整，跳过")
                 return
 
             storage = StorageChain()
             total_moved = 0
 
             for monitor_path in paths:
-                logger.info(f"【115整理】开始扫描监控目录: {monitor_path}")
+                logger.info(f"【115整理】开始扫描 115 目录: {monitor_path}")
                 parent_item = self._get_fileitem(storage, monitor_path)
                 if not parent_item:
-                    logger.error(f"【115整理】无法获取目录: {monitor_path}")
+                    logger.error(f"【115整理】无法获取 115 目录 (请检查是否为网盘内路径): {monitor_path}")
                     continue
 
                 children = storage.list_files(parent_item) or []
@@ -98,6 +94,8 @@ class movie115_organizer(_PluginBase):
                     title="115目录洗白整理完成",
                     text=f"本次共整理并移动了 {total_moved} 个文件夹。"
                 )
+        except Exception as e:
+            logger.error(f"【115整理】运行出错: {str(e)}")
         finally:
             self._lock.release()
 
@@ -110,18 +108,14 @@ class movie115_organizer(_PluginBase):
 
         # 删除小文件
         for sf in [f for f in all_files if (f.size or 0) < threshold_bytes]:
+            logger.info(f"【115整理】删除垃圾文件: {sf.name}")
             storage.delete_file(sf)
 
-        # 再次检查
-        files_after = storage.list_files(folder) or []
-        remaining = [f for f in files_after if f.type == "file"]
-        if not remaining or any((f.size or 0) < threshold_bytes for f in remaining):
-            return False
-
-        # 重命名
+        # 检查重命名
         new_name = folder.name.split('@')[-1] if '@' in folder.name else folder.name
         if new_name != folder.name:
             if not storage.rename_file(folder, new_name): return False
+            # 获取重命名后的对象
             folder = self._get_fileitem(storage, str(folder.path).rsplit("/", 1)[0] + "/" + new_name)
 
         # 移动
@@ -133,6 +127,7 @@ class movie115_organizer(_PluginBase):
 
     def _get_fileitem(self, storage: StorageChain, path: str) -> Optional[FileItem]:
         try:
+            # 强制指定 115 存储后端
             return storage.get_file_item(storage="u115", path=path)
         except:
             return None
@@ -144,24 +139,20 @@ class movie115_organizer(_PluginBase):
         }
 
     # ═══════════════════════════════════════════════════════════
-    #  V2 UI & Bot 支持
+    #  UI & 命令
     # ═══════════════════════════════════════════════════════════
 
     def get_command(self) -> List[Dict[str, Any]]:
-        """这决定了 Bot 命令和立即运行按钮"""
-        return [
-            {
-                "command": "run_115_clean",
-                "data": "run_115_clean",
-                "description": "立即整理 115 目录",
-                "handler": self.execute,
-                "icon": "PlayArrow"
-            }
-        ]
+        return [{
+            "command": "run_115_clean",
+            "data": "run_115_clean",
+            "description": "立即整理 115 目录",
+            "handler": self.execute,
+            "icon": "PlayArrow"
+        }]
 
     def get_api(self) -> List[dict]: return []
     def get_page(self) -> List[dict]: return []
-
     def get_service(self) -> List[Dict[str, Any]]:
         if self._enabled and self._cron:
             from apscheduler.triggers.cron import CronTrigger
@@ -174,24 +165,14 @@ class movie115_organizer(_PluginBase):
         return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        # 保持你原始的表单结构，确保 model 名称一致
-        return [
-            {
-                "component": "VForm",
-                "content": [
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "发送通知"}}]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后运行一次"}}]}
-                    ]},
-                    {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "cron", "label": "Cron 表达式"}}]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "size_threshold_mb", "label": "阈值 (MB)", "type": "number"}}]}
-                    ]},
-                    {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "monitor_paths", "label": "监控目录", "rows": 3}}]}]},
-                    {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "target_path", "label": "目标路径"}}]}]}
-                ]
-            }
-        ], {
-            "enabled": False, "cron": "0 */2 * * *", "monitor_paths": "", "target_path": "", "size_threshold_mb": 500, "notify": True, "run_once": False
-        }
+        return [{"component": "VForm", "content": [
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 4}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用"}}]},
+                {"component": "VCol", "props": {"cols": 4}, "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "通知"}}]},
+                {"component": "VCol", "props": {"cols": 4}, "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "立即运行"}}]}
+            ]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "monitor_paths", "label": "监控网盘路径", "hint": "115内部路径，如 /我的文件/下载"}}]}]},
+            {"component": "VRow", "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "target_path", "label": "归档网盘路径"}}]}]}
+        ]}], {"enabled": False, "cron": "0 */2 * * *", "monitor_paths": "", "target_path": "", "size_threshold_mb": 500, "notify": True, "run_once": False}

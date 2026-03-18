@@ -1,25 +1,28 @@
 import time
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Any
 from app.plugins import _PluginBase
+from app.core.config import settings
 from app.log import logger
 from app.schemas import NotificationType
-# 注意：V2 的 115 助手路径通常在 app.helper.p115 或 app.modules.p115
+
+# 自动适配 115 助手位置
 try:
     from app.helper.p115 import P115Helper
 except ImportError:
     from app.modules.p115 import P115Helper
 
 class Movie115Organizer(_PluginBase):
-    # --- 插件元数据 ---
+    # --- V2 必须定义的类属性 ---
+    plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
-    plugin_desc = "监控115路径，自动清理小文件并重命名移动。"
-    plugin_icon = "folder.png" # 确保这个图标在 MP 中存在或使用通用图标
-    plugin_version = "1.0.0"
+    plugin_desc = "监控115路径，自动清理小文件、按@符号重命名并移动归档。"
+    plugin_icon = "folder.png"
+    plugin_version = "1.1.0"
     plugin_author = "YourName"
     plugin_order = 20
     auth_level = 1
 
-    # 私有属性存储配置
+    # 配置变量初始化
     _enabled = False
     _cron = None
     _monitor_path = None
@@ -28,17 +31,21 @@ class Movie115Organizer(_PluginBase):
     _notify = True
 
     def init_plugin(self, config: dict = None):
-        """初始化配置"""
+        """保存设置后，MP V2 会自动调用此方法热重载配置"""
         if config:
             self._enabled = config.get("enabled")
             self._cron = config.get("cron")
             self._monitor_path = config.get("monitor_path")
             self._target_path = config.get("target_path")
-            self._threshold = float(config.get("threshold") or 500)
+            # 兼容字符串或数字
+            try:
+                self._threshold = float(config.get("threshold") or 500)
+            except ValueError:
+                self._threshold = 500
             self._notify = config.get("notify")
 
     def get_id_by_path(self, p115, path: str):
-        """路径转 ID 逻辑"""
+        """115 路径转 ID"""
         if not path: return None
         if not path.startswith('/'): return path
         
@@ -57,8 +64,9 @@ class Movie115Organizer(_PluginBase):
         return current_id
 
     def execute(self):
-        """主执行逻辑"""
+        """手动触发或定时触发的主逻辑"""
         if not self._enabled:
+            logger.info("【115整理】插件未启用，跳过运行")
             return
 
         p115 = P115Helper()
@@ -66,7 +74,7 @@ class Movie115Organizer(_PluginBase):
         t_id = self.get_id_by_path(p115, self._target_path)
 
         if not m_id or not t_id:
-            logger.error(f"【115整理】路径转换失败，请检查配置")
+            logger.error(f"【115整理】找不到路径: 监控({self._monitor_path}) 目标({self._target_path})")
             return
 
         try:
@@ -77,50 +85,50 @@ class Movie115Organizer(_PluginBase):
                 folder_id = item.get('id')
                 folder_name = item.get('name')
                 
-                # 清理小文件
+                # 1. 清理小文件
                 sub_files = p115.get_file_list(folder_id)
                 for sf in sub_files:
                     if not sf.get('is_dir'):
                         size_mb = sf.get('size', 0) / (1024 * 1024)
                         if size_mb < self._threshold:
                             p115.delete_file(sf.get('id'))
-                            logger.info(f"【115整理】已删除广告文件: {sf.get('name')}")
+                            logger.info(f"【115整理】已删除垃圾文件: {sf.get('name')} ({size_mb:.2f}MB)")
 
-                # 重命名
+                # 2. 重命名
                 new_name = folder_name
                 if '@' in folder_name:
                     new_name = folder_name.split('@')[-1]
                     if new_name != folder_name:
                         p115.rename_file(folder_id, new_name)
+                        logger.info(f"【115整理】已重命名: {folder_name} -> {new_name}")
 
-                # 移动
+                # 3. 移动
                 p115.move_file(folder_id, t_id)
-                logger.info(f"【115整理】已成功移动: {new_name}")
+                logger.info(f"【115整理】已归档至目标目录: {new_name}")
 
                 if self._notify:
                     self.post_message(
                         mtype=NotificationType.SiteMessage,
-                        title="115 目录整理完成",
-                        text=f"处理并归档: {new_name}"
+                        title="115 整理任务完成",
+                        text=f"文件夹 {new_name} 已洗白并归档。"
                     )
         except Exception as e:
-            logger.error(f"【115整理】运行异常: {str(e)}")
+            logger.error(f"【115整理】运行报错: {str(e)}")
 
     def get_service(self) -> List[Dict[str, Any]]:
-        """注册定时服务 (Cron)"""
+        """注册 V2 定时任务"""
         if self._enabled and self._cron:
             from apscheduler.triggers.cron import CronTrigger
             return [{
                 "id": "Movie115Organizer",
-                "name": "115 整理定时服务",
+                "name": "115 整理服务",
                 "trigger": CronTrigger.from_crontab(self._cron),
-                "func": self.execute,
-                "kwargs": {}
+                "func": self.execute
             }]
         return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """构建 V2 版本的表单界面"""
+        """V2 专用表单定义"""
         return [
             {
                 'component': 'VForm',
@@ -128,11 +136,22 @@ class Movie115Organizer(_PluginBase):
                     {
                         'component': 'VRow',
                         'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
                                 {'component': 'VSwitch', 'props': {'model': 'enabled', 'label': '启用插件'}}
                             ]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [
-                                {'component': 'VSwitch', 'props': {'model': 'notify', 'label': '开启通知'}}
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
+                                {'component': 'VSwitch', 'props': {'model': 'notify', 'label': '启用通知'}}
+                            ]}
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12}, 'content': [
+                                {'component': 'VTextField', 'props': {'model': 'monitor_path', 'label': '监控路径 (如 /Movies/Temp)'}}
+                            ]},
+                            {'component': 'VCol', 'props': {'cols': 12}, 'content': [
+                                {'component': 'VTextField', 'props': {'model': 'target_path', 'label': '归档路径 (如 /Movies/Library)'}}
                             ]}
                         ]
                     },
@@ -140,21 +159,10 @@ class Movie115Organizer(_PluginBase):
                         'component': 'VRow',
                         'content': [
                             {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
-                                {'component': 'VTextField', 'props': {'model': 'monitor_path', 'label': '监控路径或ID'}}
+                                {'component': 'VCronField', 'props': {'model': 'cron', 'label': '定时任务周期'}}
                             ]},
                             {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
-                                {'component': 'VTextField', 'props': {'model': 'target_path', 'label': '目标路径或ID'}}
-                            ]}
-                        ]
-                    },
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
-                                {'component': 'VCronField', 'props': {'model': 'cron', 'label': '运行周期'}}
-                            ]},
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 6}, 'content': [
-                                {'component': 'VTextField', 'props': {'model': 'threshold', 'label': '体积阈值 (MB)'}}
+                                {'component': 'VTextField', 'props': {'model': 'threshold', 'label': '清理阈值 (MB)'}}
                             ]}
                         ]
                     }
@@ -168,11 +176,11 @@ class Movie115Organizer(_PluginBase):
         }
 
     def get_command(self) -> List[Dict[str, Any]]:
-        """注册 Bot 命令"""
+        """Bot 指令"""
         return [{
             "command": "run_115_clean",
             "data": "run_115_clean",
-            "description": "立即运行 115 洗白整理",
+            "description": "手动触发 115 整理",
             "handler": self.execute
         }]
 

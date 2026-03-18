@@ -1,0 +1,11 @@
+{
+  "movie115_organizer": {
+    "name": "115 目录洗白整理",
+    "description": "监控115路径，自动清理小文件、按@符号重命名并移动归档。",
+    "labels": "工具,网盘",
+    "version": "1.1.0",
+    "icon": "folder.png",
+    "author": "YourName",
+    "level": 1
+  }
+}

@@ -15,13 +15,12 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径。"
     plugin_icon = "Folder"
-    plugin_version = "1.3.8"
+    plugin_version = "1.3.9"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
 
     _lock = Lock()
-    _methods_logged = False  # 只打印一次可用方法
 
     _enabled: bool = False
     _cron: str = "0 */2 * * *"
@@ -56,6 +55,62 @@ class movie115_organizer(_PluginBase):
         pass
 
     # ═══════════════════════════════════════════════════════════
+    #  获取底层 u115 存储模块实例（每次都重新获取，避免缓存问题）
+    # ═══════════════════════════════════════════════════════════
+
+    def _get_u115_module(self):
+        """
+        从 StorageChain 或模块系统中获取底层 u115 存储实例，
+        并打印其所有可用方法，便于调试。
+        """
+        try:
+            # 方式1：通过 StorageChain 的 storages 字典
+            storage_chain = StorageChain()
+            for attr in ("storages", "_storages", "storage_dict", "modules"):
+                container = getattr(storage_chain, attr, None)
+                if container and isinstance(container, dict):
+                    for key, module in container.items():
+                        if "115" in str(key) or "u115" in str(key).lower():
+                            methods = [m for m in dir(module) if not m.startswith("_")]
+                            logger.info(f"【115整理】找到 u115 模块(via {attr}[{key!r}])，可用方法: {methods}")
+                            return module
+
+            # 方式2：直接 import u115 模块类
+            try:
+                from app.modules.filemanager.storages.u115 import U115Storage
+                inst = U115Storage()
+                methods = [m for m in dir(inst) if not m.startswith("_")]
+                logger.info(f"【115整理】直接实例化 U115Storage，可用方法: {methods}")
+                return inst
+            except ImportError:
+                pass
+
+            # 方式3：通过 run_module 查询
+            try:
+                from app.core.module import ModuleManager
+                mm = ModuleManager()
+                mod = mm.get_module("U115Storage") or mm.get_module("u115")
+                if mod:
+                    methods = [m for m in dir(mod) if not m.startswith("_")]
+                    logger.info(f"【115整理】通过 ModuleManager 获取 u115，可用方法: {methods}")
+                    return mod
+            except Exception:
+                pass
+
+            # 兜底：打印 StorageChain 自身方法供分析
+            sc_methods = [m for m in dir(storage_chain) if not m.startswith("_")]
+            logger.error(
+                f"【115整理】无法获取底层 u115 模块。\n"
+                f"StorageChain 可用方法: {sc_methods}\n"
+                f"请将此日志发给开发者。"
+            )
+            return None
+
+        except Exception as e:
+            logger.error(f"【115整理】_get_u115_module 异常: {e}", exc_info=True)
+            return None
+
+    # ═══════════════════════════════════════════════════════════
     #  主流程
     # ═══════════════════════════════════════════════════════════
 
@@ -73,12 +128,8 @@ class movie115_organizer(_PluginBase):
                 return
 
             storage = StorageChain()
-
-            # ── 首次运行时打印所有可用方法，方便排查 API ──────
-            if not movie115_organizer._methods_logged:
-                methods = [m for m in dir(storage) if not m.startswith("_")]
-                logger.info(f"【115整理】StorageChain 可用方法: {methods}")
-                movie115_organizer._methods_logged = True
+            # 每次执行都探测一次底层模块，确保方法名被打印到日志
+            u115 = self._get_u115_module()
 
             total_moved = 0
             for monitor_path in paths:
@@ -93,7 +144,7 @@ class movie115_organizer(_PluginBase):
                 logger.info(f"【115整理】发现 {len(subfolders)} 个子文件夹: {[f.name for f in subfolders]}")
 
                 for folder in subfolders:
-                    if self._process_folder(storage, folder):
+                    if self._process_folder(storage, u115, folder):
                         total_moved += 1
 
             logger.info(f"【115整理】本次共归档 {total_moved} 个文件夹")
@@ -110,7 +161,7 @@ class movie115_organizer(_PluginBase):
     #  单文件夹处理
     # ═══════════════════════════════════════════════════════════
 
-    def _process_folder(self, storage: StorageChain, folder: FileItem) -> bool:
+    def _process_folder(self, storage: StorageChain, u115, folder: FileItem) -> bool:
         fname = folder.name
         threshold_bytes = self._size_threshold_mb * 1024 * 1024
         logger.info(f"【115整理】>>> 开始处理文件夹: {fname}")
@@ -134,150 +185,111 @@ class movie115_organizer(_PluginBase):
             f"小文件 {len(small)} 个，大文件 {len(large)} 个"
         )
         for sf in small:
-            logger.info(f"【115整理】[{fname}] 删除小文件: {sf.name} ({self._fmt(sf.size)})")
+            logger.info(f"【115整理】[{fname}] 删除: {sf.name} ({self._fmt(sf.size)})")
             try:
                 ok = storage.delete_file(sf)
-                logger.info(f"【115整理】[{fname}] 删除结果: {'成功' if ok else '失败'} → {sf.name}")
+                logger.info(f"【115整理】[{fname}] 删除{'成功' if ok else '失败'}: {sf.name}")
             except Exception as e:
                 logger.error(f"【115整理】[{fname}] 删除异常: {sf.name} → {e}", exc_info=True)
 
-        # ── Step 3: 再次检查 ────────────────────────────────
+        # ── Step 3: 再次确认 ────────────────────────────────
         files_after = storage.list_files(folder) or []
         remaining = [f for f in files_after if f.type == "file"]
         still_small = [f for f in remaining if (f.size or 0) < threshold_bytes]
+        logger.info(f"【115整理】[{fname}] 删除后剩余 {len(remaining)} 个，仍小于阈值: {len(still_small)} 个")
 
-        logger.info(
-            f"【115整理】[{fname}] 删除后剩余 {len(remaining)} 个文件，"
-            f"仍小于阈值: {len(still_small)} 个"
-        )
-
-        # 删完后为空 → 可能还在下载中，暂不移动
         if not remaining:
-            logger.info(f"【115整理】[{fname}] 删除小文件后文件夹为空，可能仍在下载中，跳过本轮")
+            logger.info(f"【115整理】[{fname}] 删除后为空，可能仍在下载中，跳过")
             return False
-
         if still_small:
-            logger.warning(
-                f"【115整理】[{fname}] 仍有小文件未删除，跳过: "
-                f"{[(f.name, self._fmt(f.size)) for f in still_small]}"
-            )
+            logger.warning(f"【115整理】[{fname}] 仍有小文件未删除，跳过: {[(f.name, self._fmt(f.size)) for f in still_small]}")
             return False
 
-        # ── Step 4: 重命名大文件（去除@前缀）──────────────
+        # ── Step 4: 重命名大文件（去除 @ 前缀）────────────
         big_files = [f for f in remaining if (f.size or 0) >= threshold_bytes]
         for bf in big_files:
             if "@" in bf.name:
                 new_fname = bf.name.split("@")[-1]
-                logger.info(f"【115整理】[{fname}] 重命名文件: {bf.name!r} → {new_fname!r}")
+                logger.info(f"【115整理】[{fname}] 重命名: {bf.name!r} → {new_fname!r}")
                 try:
                     ok = storage.rename_file(bf, new_fname)
-                    logger.info(f"【115整理】[{fname}] 文件重命名结果: {'成功' if ok else '失败'}")
+                    logger.info(f"【115整理】[{fname}] 重命名{'成功' if ok else '失败'}")
                 except Exception as e:
-                    logger.error(f"【115整理】[{fname}] 文件重命名异常: {e}", exc_info=True)
+                    logger.error(f"【115整理】[{fname}] 重命名异常: {e}", exc_info=True)
             else:
                 logger.info(f"【115整理】[{fname}] 文件无需重命名: {bf.name}")
 
-        # ── Step 5: 移动文件夹到目标路径 ────────────────────
+        # ── Step 5: 移动文件夹 ──────────────────────────────
         target_path = self._target_path.rstrip("/")
         target_item = self._get_fileitem(storage, target_path)
         if not target_item:
-            logger.error(f"【115整理】[{fname}] 无法获取目标路径，跳过: {target_path}")
+            logger.error(f"【115整理】[{fname}] 无法获取目标路径: {target_path}")
             return False
 
         logger.info(f"【115整理】[{fname}] 开始移动 → {target_path}")
-        ok = self._move_folder(storage, folder, target_item)
+        ok = self._do_move(storage, u115, folder, target_item)
         logger.info(f"【115整理】[{fname}] 移动结果: {'成功 ✅' if ok else '失败 ❌'}")
         return ok
 
     # ═══════════════════════════════════════════════════════════
-    #  移动：依次尝试多种 API，最后降级为复制+删除
+    #  移动实现：优先用底层模块，其次 StorageChain，最后报错
     # ═══════════════════════════════════════════════════════════
 
-    def _move_folder(self, storage: StorageChain, src: FileItem, dst_dir: FileItem) -> bool:
+    def _do_move(self, storage: StorageChain, u115, src: FileItem, dst_dir: FileItem) -> bool:
         """
-        尝试顺序：
-        1. storage.move_file(src, dst_dir)      ← 标准名（已知不存在）
-        2. storage.move(src, dst_dir)            ← 备用名
-        3. storage.transfer_file(src, dst_dir)  ← 备用名
-        4. 复制文件夹内所有文件到目标 + 删除源文件夹（最终兜底）
+        按优先级尝试所有已知 move 相关方法。
+        src.fileid  = 源文件夹的 115 cid
+        dst_dir.fileid = 目标目录的 115 cid
         """
-        # 尝试各种可能的 move 方法名
-        for method_name in ("move_file", "move", "transfer_file", "copy_to"):
-            method = getattr(storage, method_name, None)
-            if method is None:
+        # ── 候选1：底层 u115 模块的各种可能方法名 ──────────
+        if u115 is not None:
+            for mname in ("move", "move_file", "move_dir", "moveto",
+                          "move_to", "transfer", "rename_move"):
+                m = getattr(u115, mname, None)
+                if m is None:
+                    continue
+                logger.info(f"【115整理】尝试 u115.{mname}(src, dst_dir)")
+                try:
+                    # 优先用 fileid（115 原生接口），其次传 FileItem
+                    src_id  = getattr(src, "fileid", None) or getattr(src, "file_id", None)
+                    dst_id  = getattr(dst_dir, "fileid", None) or getattr(dst_dir, "file_id", None)
+                    if src_id and dst_id:
+                        ok = m(src_id, dst_id)
+                    else:
+                        ok = m(src, dst_dir)
+                    if ok:
+                        logger.info(f"【115整理】u115.{mname}() 成功")
+                        return True
+                    logger.warning(f"【115整理】u115.{mname}() 返回失败")
+                except Exception as e:
+                    logger.warning(f"【115整理】u115.{mname}() 异常: {e}")
+
+        # ── 候选2：StorageChain 的各种可能方法名 ────────────
+        for mname in ("move_file", "move", "transfer_file", "copy_file", "copy"):
+            m = getattr(storage, mname, None)
+            if m is None:
                 continue
-            logger.info(f"【115整理】尝试使用 storage.{method_name}()")
+            logger.info(f"【115整理】尝试 StorageChain.{mname}(src, dst_dir)")
             try:
-                ok = method(src, dst_dir)
+                ok = m(src, dst_dir)
                 if ok:
-                    logger.info(f"【115整理】storage.{method_name}() 移动成功")
+                    logger.info(f"【115整理】StorageChain.{mname}() 成功")
                     return True
-                else:
-                    logger.warning(f"【115整理】storage.{method_name}() 返回失败，尝试下一个")
+                logger.warning(f"【115整理】StorageChain.{mname}() 返回失败")
             except Exception as e:
-                logger.warning(f"【115整理】storage.{method_name}() 异常: {e}")
+                logger.warning(f"【115整理】StorageChain.{mname}() 异常: {e}")
 
-        # ── 兜底：复制所有文件到目标子文件夹，再删除原文件夹 ──
-        logger.info(f"【115整理】未找到 move API，降级为 复制+删除 方案")
-        return self._copy_then_delete(storage, src, dst_dir)
-
-    def _copy_then_delete(self, storage: StorageChain, src_folder: FileItem, dst_dir: FileItem) -> bool:
-        """
-        在目标目录下创建同名文件夹，复制所有文件，然后删除源文件夹。
-        注意：StorageChain 若无 copy_file 方法则此方案也会失败，届时日志会显示。
-        """
-        fname = src_folder.name
-
-        # 列出源文件夹所有内容
-        items = storage.list_files(src_folder) or []
-        if not items:
-            logger.warning(f"【115整理】[{fname}] 复制+删除：源文件夹为空")
-            return False
-
-        # 尝试找 copy 相关方法
-        copy_method = None
-        for name in ("copy_file", "copy", "duplicate_file"):
-            m = getattr(storage, name, None)
-            if m:
-                copy_method = (name, m)
-                break
-
-        if copy_method is None:
-            # 列出全部方法供用户参考
-            all_methods = [m for m in dir(storage) if not m.startswith("_") and callable(getattr(storage, m))]
-            logger.error(
-                f"【115整理】[{fname}] StorageChain 无任何 move/copy 方法，无法移动。\n"
-                f"  全部可用方法: {all_methods}\n"
-                f"  请将此日志反馈给开发者以适配正确的 API 方法名。"
-            )
-            return False
-
-        method_name, copy_fn = copy_method
-        logger.info(f"【115整理】[{fname}] 使用 storage.{method_name}() 复制各文件")
-
-        success_count = 0
-        for item in items:
-            try:
-                ok = copy_fn(item, dst_dir)
-                if ok:
-                    success_count += 1
-                    logger.info(f"【115整理】[{fname}] 复制成功: {item.name}")
-                else:
-                    logger.error(f"【115整理】[{fname}] 复制失败: {item.name}")
-                    return False
-            except Exception as e:
-                logger.error(f"【115整理】[{fname}] 复制异常: {item.name} → {e}", exc_info=True)
-                return False
-
-        # 全部复制成功后删除源文件夹
-        logger.info(f"【115整理】[{fname}] 复制完成 {success_count} 项，开始删除源文件夹")
-        try:
-            ok = storage.delete_file(src_folder)
-            logger.info(f"【115整理】[{fname}] 删除源文件夹结果: {'成功' if ok else '失败'}")
-            return bool(ok)
-        except Exception as e:
-            logger.error(f"【115整理】[{fname}] 删除源文件夹异常: {e}", exc_info=True)
-            return False
+        # ── 全部失败：打印完整方法列表供定位 ───────────────
+        sc_methods = [m for m in dir(storage) if not m.startswith("_") and callable(getattr(storage, m))]
+        u115_methods = ([m for m in dir(u115) if not m.startswith("_") and callable(getattr(u115, m))]
+                        if u115 else [])
+        logger.error(
+            f"【115整理】所有 move 方法均失败。\n"
+            f"  StorageChain 方法: {sc_methods}\n"
+            f"  u115 模块方法:     {u115_methods}\n"
+            f"  请将此日志提交给开发者。"
+        )
+        return False
 
     # ═══════════════════════════════════════════════════════════
     #  工具方法
@@ -287,22 +299,12 @@ class movie115_organizer(_PluginBase):
         try:
             parts = [p for p in path.strip("/").split("/") if p]
             if not parts:
-                logger.error("【115整理】_get_fileitem: 路径为空")
                 return None
-
-            root_item = FileItem(
-                storage="u115",
-                fileid="0",
-                path="/",
-                type="dir",
-                name=""
-            )
-
+            root_item = FileItem(storage="u115", fileid="0", path="/", type="dir", name="")
             current_items = storage.list_files(root_item) or []
             if not current_items:
-                logger.error("【115整理】无法列出 115 根目录，请确认账号已配置")
+                logger.error("【115整理】无法列出 115 根目录")
                 return None
-
             current_item = None
             for i, part in enumerate(parts):
                 matched = next((item for item in current_items if item.name == part), None)
@@ -310,15 +312,13 @@ class movie115_organizer(_PluginBase):
                     logger.error(
                         f"【115整理】路径段 '{part}' 未找到，"
                         f"当前层: {[item.name for item in current_items[:10]]}，"
-                        f"目标路径: {path}"
+                        f"目标: {path}"
                     )
                     return None
                 current_item = matched
                 if i < len(parts) - 1:
                     current_items = storage.list_files(current_item) or []
-
             return current_item
-
         except Exception as e:
             logger.error(f"【115整理】_get_fileitem 异常 ({path}): {e}", exc_info=True)
             return None

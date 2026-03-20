@@ -16,8 +16,8 @@ class movie115_organizer(_PluginBase):
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去除@前缀重命名、移动到目标路径，并生成STRM文件。"
-    plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.4.7"
+    plugin_icon = "Folder"
+    plugin_version = "1.4.8"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -35,6 +35,7 @@ class movie115_organizer(_PluginBase):
     _strm_enabled: bool = False
     _strm_local_path: str = ""
     _strm_template: str = "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}"
+    _mdcx_container: str = ""
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -52,6 +53,7 @@ class movie115_organizer(_PluginBase):
             self._strm_local_path   = config.get("strm_local_path", "")
             self._strm_template     = config.get("strm_template",
                 "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}")
+            self._mdcx_container    = config.get("mdcx_container", "")
 
         if self._run_once:
             self._run_once = False
@@ -162,6 +164,16 @@ class movie115_organizer(_PluginBase):
                                                          "size": "x-small", "label": True
                                                      },
                                                      "text": "是" if self._notify else "否"},
+                                                ]
+                                            },
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "d-flex align-center justify-space-between mt-2"},
+                                                "content": [
+                                                    {"component": "span", "props": {"class": "text-caption text-medium-emphasis"},
+                                                     "text": "刮削容器"},
+                                                    {"component": "span", "props": {"class": "text-caption font-weight-bold"},
+                                                     "text": self._mdcx_container or "未配置"},
                                                 ]
                                             },
                                         ]
@@ -329,6 +341,7 @@ class movie115_organizer(_PluginBase):
 
             storage = StorageChain()
             total_moved = 0
+            total_strm = 0
 
             for monitor_path in paths:
                 logger.info(f"【115整理】开始扫描 115 目录: {monitor_path}")
@@ -342,16 +355,22 @@ class movie115_organizer(_PluginBase):
                 logger.info(f"【115整理】发现 {len(subfolders)} 个子文件夹: {[f.name for f in subfolders]}")
 
                 for folder in subfolders:
-                    if self._process_folder(storage, folder):
+                    moved, strm_count = self._process_folder(storage, folder)
+                    if moved:
                         total_moved += 1
+                        total_strm += strm_count
 
-            logger.info(f"【115整理】本次共归档 {total_moved} 个文件夹")
+            logger.info(f"【115整理】本次共归档 {total_moved} 个文件夹，生成 STRM {total_strm} 个")
             if self._notify and total_moved > 0:
                 self.post_message(
                     mtype=NotificationType.SiteMessage,
                     title="115目录洗白整理完成",
-                    text=f"本次共整理并移动了 {total_moved} 个文件夹。"
+                    text=f"本次共整理并移动了 {total_moved} 个文件夹，生成 STRM {total_strm} 个。"
                 )
+
+            # 仅在实际生成了 STRM 文件时才重启 mdcx
+            if total_strm > 0 and self._mdcx_container.strip():
+                self._restart_mdcx(self._mdcx_container.strip())
         finally:
             self._lock.release()
 
@@ -359,7 +378,8 @@ class movie115_organizer(_PluginBase):
     #  单文件夹处理
     # ═══════════════════════════════════════════════════════════
 
-    def _process_folder(self, storage: StorageChain, folder: FileItem) -> bool:
+    def _process_folder(self, storage: StorageChain, folder: FileItem) -> Tuple[bool, int]:
+        """返回 (是否成功移动, 成功生成的STRM数量)"""
         fname = folder.name
         threshold_bytes = self._size_threshold_mb * 1024 * 1024
         logger.info(f"【115整理】>>> 开始处理: {fname}")
@@ -369,7 +389,7 @@ class movie115_organizer(_PluginBase):
         logger.info(f"【115整理】[{fname}] {len(all_files)} 个文件: {[(f.name, self._fmt(f.size)) for f in all_files]}")
         if not all_files:
             logger.info(f"【115整理】[{fname}] 为空（下载中），跳过")
-            return False
+            return False, 0
 
         small = [f for f in all_files if (f.size or 0) < threshold_bytes]
         large = [f for f in all_files if (f.size or 0) >= threshold_bytes]
@@ -387,10 +407,10 @@ class movie115_organizer(_PluginBase):
         logger.info(f"【115整理】[{fname}] 删除后剩余{len(remaining)}个，仍小于阈值:{len(still_small)}个")
         if not remaining:
             logger.info(f"【115整理】[{fname}] 删完为空，可能下载中，跳过")
-            return False
+            return False, 0
         if still_small:
             logger.warning(f"【115整理】[{fname}] 小文件未删完，跳过")
-            return False
+            return False, 0
 
         # 重命名大文件，记录 (最终文件名, pickcode)
         strm_targets: List[Tuple[str, str]] = []
@@ -415,21 +435,24 @@ class movie115_organizer(_PluginBase):
         ok = self._do_move(folder, target_path)
         logger.info(f"【115整理】[{fname}] 移动结果: {'✅成功' if ok else '❌失败'}")
         if not ok:
-            return False
+            return False, 0
 
-        # 生成 STRM
+        # 生成 STRM，统计实际成功数量
+        strm_count = 0
         if self._strm_enabled and self._strm_local_path.strip():
             for file_name, pickcode in strm_targets:
-                self._generate_strm(fname, file_name, pickcode, target_path)
+                if self._generate_strm(fname, file_name, pickcode, target_path):
+                    strm_count += 1
 
-        return True
+        return True, strm_count
 
     # ═══════════════════════════════════════════════════════════
     #  STRM 生成
     # ═══════════════════════════════════════════════════════════
 
     def _generate_strm(self, folder_name: str, file_name: str,
-                       pickcode: str, cloud_target_path: str):
+                       pickcode: str, cloud_target_path: str) -> bool:
+        """生成 STRM 文件，返回是否成功。"""
         try:
             local_dir = Path(self._strm_local_path.rstrip("/")) / folder_name
             local_dir.mkdir(parents=True, exist_ok=True)
@@ -442,8 +465,64 @@ class movie115_organizer(_PluginBase):
             strm_file.write_text(content, encoding="utf-8")
             logger.info(f"【115整理】STRM 生成成功: {strm_file}")
             logger.info(f"【115整理】STRM 内容: {content}")
+            return True
         except Exception as e:
             logger.error(f"【115整理】STRM 生成失败 ({folder_name}/{file_name}): {e}", exc_info=True)
+            return False
+
+    # ═══════════════════════════════════════════════════════════
+    #  重启 mdcx 容器（触发自动刮削）
+    # ═══════════════════════════════════════════════════════════
+
+    def _restart_mdcx(self, container_name: str):
+        """
+        通过 Docker Unix Socket 重启指定容器。
+        等效于：curl --unix-socket /var/run/docker.sock -X POST http://localhost/containers/{name}/restart
+        需要 MoviePilot 容器挂载了 /var/run/docker.sock。
+        """
+        import socket
+        import json
+
+        sock_path = "/var/run/docker.sock"
+        if not os.path.exists(sock_path):
+            logger.error(f"【115整理】Docker socket 不存在: {sock_path}，无法重启 {container_name}")
+            return
+
+        try:
+            logger.info(f"【115整理】正在重启容器: {container_name}")
+            # 构造 HTTP over Unix socket 请求
+            request = (
+                f"POST /containers/{container_name}/restart HTTP/1.1\r\n"
+                f"Host: localhost\r\n"
+                f"Content-Length: 0\r\n"
+                f"Connection: close\r\n"
+                f"\r\n"
+            )
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect(sock_path)
+            sock.sendall(request.encode("utf-8"))
+
+            # 读取响应
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            sock.close()
+
+            # 解析 HTTP 状态码
+            status_line = response.decode("utf-8", errors="ignore").split("\r\n")[0]
+            logger.info(f"【115整理】Docker 重启响应: {status_line}")
+
+            if "204" in status_line:
+                logger.info(f"【115整理】✅ 容器 {container_name} 重启成功")
+            else:
+                logger.warning(f"【115整理】容器 {container_name} 重启响应异常: {status_line}")
+
+        except Exception as e:
+            logger.error(f"【115整理】重启容器 {container_name} 失败: {e}", exc_info=True)
 
     # ═══════════════════════════════════════════════════════════
     #  移动
@@ -516,6 +595,7 @@ class movie115_organizer(_PluginBase):
             "strm_enabled": self._strm_enabled,
             "strm_local_path": self._strm_local_path,
             "strm_template": self._strm_template,
+            "mdcx_container": self._mdcx_container,
         }
 
     # ═══════════════════════════════════════════════════════════
@@ -585,6 +665,15 @@ class movie115_organizer(_PluginBase):
                     ]},
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [
+                            {"component": "VTextField", "props": {
+                                "model": "mdcx_container",
+                                "label": "mdcx 容器名",
+                                "placeholder": "mdcx",
+                                "hint": "需在 mdcx 里开启「启动软件自动刮削」选项，生成STRM后将自动重启该容器触发刮削（留空则不重启）"
+                            }}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [
                             {"component": "VAlert", "props": {
                                 "type": "info", "variant": "tonal",
                                 "text": (
@@ -608,4 +697,5 @@ class movie115_organizer(_PluginBase):
             "strm_enabled": False,
             "strm_local_path": "",
             "strm_template": "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}",
+            "mdcx_container": "",
         }

@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.6.4"
+    plugin_version = "1.6.5"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -260,7 +260,6 @@ class movie115_organizer(_PluginBase):
     # ═══════════════════════════════════════════════════════════
 
     def _parse_cd_args(self, text: str) -> Tuple[List[str], str]:
-        """解析离线下载文本参数，剥离出下载链接与目标目录"""
         text = re.sub(r'(?<!^)(https?://|ftp://|magnet:\?|ed2k://)', r' \1', str(text), flags=re.IGNORECASE)
         
         parts = text.split()
@@ -313,29 +312,51 @@ class movie115_organizer(_PluginBase):
 
         for url in urls:
             try:
-                # 智能反射：深度提取底层 client 并兼容所有常见 115 python库的离线方法
-                client = getattr(u115, "client", getattr(u115, "_client", getattr(u115, "pan", None)))
-                res = None
+                client = None
                 
-                if hasattr(u115, 'add_offline_task'):
-                    res = u115.add_offline_task(url, folder_id=cid)
-                elif client:
-                    # 针对 p115client 及其衍生库
-                    if hasattr(client, 'offline_add_urls'):
-                        res = client.offline_add_urls([url], wp_path_id=cid)
-                    elif hasattr(client, 'offline_add_task'):
-                        res = client.offline_add_task([url], wp_path_id=cid)
-                    elif hasattr(client, 'offline_add_url'):
-                        res = client.offline_add_url(url, wp_path_id=cid)
-                    # 针对 python-115 库
-                    elif hasattr(client, 'offline') and hasattr(client.offline, 'add_url'):
-                        res = client.offline.add_url(url, cid=cid)
-                    else:
-                        # 如果上述都不中，提取带有 offline 或 add 字眼的方法供排查
-                        candidates = [m for m in dir(client) if 'offline' in m.lower() or 'add' in m.lower()]
-                        raise NotImplementedError(f"未匹配到已知离线方法。当前底层可用疑似方法有: {candidates}")
+                # 策略一：深度扫描现有实例，寻找带 offline 或 add_url 等特征的属性/方法
+                scan_targets = [u115] + [getattr(u115, a) for a in dir(u115) if not a.startswith('__')]
+                for target in scan_targets:
+                    try:
+                        if any(hasattr(target, m) for m in ['offline_add_urls', 'offline_add_task', 'offline_add_url', 'offline', 'add_offline_task']):
+                            client = target
+                            logger.info(f"【115离线】通过反射扫描找到底层API代理: {type(target).__name__}")
+                            break
+                    except Exception:
+                        pass
+                
+                # 策略二：原生直接接管。读取系统配置并独立实例化 p115client
+                if not client:
+                    try:
+                        from app.core.config import settings
+                        u115_cookie = getattr(settings, 'U115_COOKIE', None)
+                        if u115_cookie:
+                            from p115client import P115Client
+                            client = P115Client(u115_cookie)
+                            logger.info("【115离线】利用系统 U115_COOKIE 独立初始化 P115Client 成功!")
+                    except Exception as e:
+                        logger.debug(f"【115离线】独立初始化 P115Client 尝试失败: {e}")
+                
+                if not client:
+                    available_attrs = [a for a in dir(u115) if not a.startswith('__')] if u115 else []
+                    raise NotImplementedError(f"无法捕获底层 115 client 实例，且配置提取失败。当前 u115 暴露的属性: {available_attrs}")
+                
+                res = None
+                # 执行离线调用
+                if hasattr(client, 'add_offline_task'):
+                    res = client.add_offline_task(url, folder_id=cid)
+                elif hasattr(client, 'offline_add_urls'):
+                    res = client.offline_add_urls([url], wp_path_id=cid)
+                elif hasattr(client, 'offline_add_task'):
+                    res = client.offline_add_task([url], wp_path_id=cid)
+                elif hasattr(client, 'offline_add_url'):
+                    res = client.offline_add_url(url, wp_path_id=cid)
+                elif hasattr(client, 'offline') and hasattr(client.offline, 'add_url'):
+                    res = client.offline.add_url(url, cid=cid)
+                elif hasattr(client, 'offline') and hasattr(client.offline, 'add_urls'):
+                    res = client.offline.add_urls([url], cid=cid)
                 else:
-                    raise NotImplementedError("无法捕获到任何底层的 115 client 实例")
+                    raise NotImplementedError("获取到了 client，但未找到对应的离线下载方法签名。")
                 
                 logger.info(f"【115离线】添加任务成功: {url[:40]}... 返回: {res}")
                 success_count += 1

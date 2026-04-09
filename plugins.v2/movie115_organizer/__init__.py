@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.7.2"
+    plugin_version = "1.7.3"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -303,7 +303,7 @@ class movie115_organizer(_PluginBase):
             self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="指令未指定目录，且未配置默认云下载目录，无法执行离线下载。")
             return
 
-        logger.info(f"【115离线】共发现 {len(urls)} 个链接，目标目录: {target_dir}")
+        logger.info(f"【115离线】共发现 {len(urls)} 个链接，目标路径: {target_dir}")
         storage = StorageChain()
         folder_item = self._get_fileitem(storage, target_dir)
         
@@ -311,7 +311,30 @@ class movie115_organizer(_PluginBase):
             self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text=f"目标目录获取失败或在115中不存在: {target_dir}")
             return
 
-        cid = getattr(folder_item, "fileid", "0")
+        # ---- 终极版：全方位地毯式提取真实目录 ID ----
+        cid = None
+        # 1. 尝试常规属性
+        for attr in ['fileid', 'id', 'item_id', 'fid', 'wp_path_id']:
+            val = getattr(folder_item, attr, None)
+            if val and str(val) != "0":
+                cid = str(val)
+                break
+                
+        # 2. 如果常规没有，尝试深度探测字典封装
+        if not cid and hasattr(folder_item, 'extra') and isinstance(folder_item.extra, dict):
+            for attr in ['fileid', 'id', 'item_id', 'fid']:
+                val = folder_item.extra.get(attr)
+                if val and str(val) != "0":
+                    cid = str(val)
+                    break
+                    
+        # 3. 兜底回退为根目录
+        if not cid:
+            cid = "0"
+            logger.warning(f"【115离线】警告：未能提取到 {target_dir} 的真实目录ID，将退化使用根目录(0)。")
+        else:
+            logger.info(f"【115离线】精准捕获真实目标目录ID: {cid}")
+
         u115 = self._get_u115()
         if not u115:
             self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="获取 115 实例失败，无法发起离线。")
@@ -347,13 +370,19 @@ class movie115_organizer(_PluginBase):
                 res = None
                 is_success = False
                 
+                # 策略1：独立逃生舱多态尝试
                 if p115_client:
                     try:
-                        res = p115_client.offline_add_urls([url], pid=cid)
-                    except TypeError:
                         res = p115_client.offline_add_urls([url], wp_path_id=cid)
-                    is_success = True
+                        is_success = True
+                    except TypeError:
+                        try:
+                            res = p115_client.offline_add_urls([url], pid=cid)
+                            is_success = True
+                        except Exception:
+                            pass
                 
+                # 策略2：系统底层 API 盲打
                 if not is_success and hasattr(u115, '_request_api'):
                     try:
                         logger.info("【115离线】尝试使用底层 _request_api 盲打 App 接口...")
@@ -364,27 +393,32 @@ class movie115_organizer(_PluginBase):
                         )
                         if isinstance(res, dict) and res.get("state"):
                             is_success = True
-                        else:
-                            logger.debug(f"盲打接口返回异常/失败状态: {res}")
-                    except Exception as e:
-                        logger.debug(f"盲打接口调用抛错: {e}")
+                    except Exception:
+                        pass
                 
+                # 策略3：传统的反射多态兼容
                 if not is_success:
                     _c = getattr(u115, "client", getattr(u115, "_client", getattr(u115, "pan", None)))
                     if hasattr(_c, 'offline_add_urls'):
                         try:
-                            res = _c.offline_add_urls([url], pid=cid)
-                        except TypeError:
                             res = _c.offline_add_urls([url], wp_path_id=cid)
+                        except TypeError:
+                            res = _c.offline_add_urls([url], pid=cid)
                         is_success = True
                     elif hasattr(u115, 'add_offline_task'):
                         try:
                             res = u115.add_offline_task(url, folder_id=cid)
                         except TypeError:
-                            res = u115.add_offline_task(url, pid=cid)
+                            try:
+                                res = u115.add_offline_task(url, wp_path_id=cid)
+                            except TypeError:
+                                res = u115.add_offline_task(url, pid=cid)
                         is_success = True
                     elif hasattr(_c, 'offline_add_task'):
-                        res = _c.offline_add_task([url], pid=cid)
+                        try:
+                            res = _c.offline_add_task([url], wp_path_id=cid)
+                        except TypeError:
+                            res = _c.offline_add_task([url], pid=cid)
                         is_success = True
                     elif hasattr(_c, 'offline') and hasattr(_c.offline, 'add_url'):
                         res = _c.offline.add_url(url, cid=cid)
@@ -612,7 +646,7 @@ class movie115_organizer(_PluginBase):
                 if i < len(parts) - 1:
                     current_items = storage.list_files(current_item) or []
                     
-            logger.info(f"【115整理】路径解析成功！获取到目标文件夹ID: {getattr(current_item, 'fileid', '未知')}")
+            logger.info(f"【115整理】路径解析成功！目标文件夹 [{current_item.name}]")
             return current_item
         except Exception as e:
             logger.error(f"【115整理】路径解析异常: {e}", exc_info=True)

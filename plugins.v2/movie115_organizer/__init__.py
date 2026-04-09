@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.8.1"
+    plugin_version = "1.8.2"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -131,7 +131,7 @@ class movie115_organizer(_PluginBase):
                             ]},
                         ]}
                     ]}
-                ]},
+                ]}
             ]},
             {"component": "VRow", "content": [
                 {"component": "VCol", "props": {"cols": 12}, "content": [
@@ -201,7 +201,6 @@ class movie115_organizer(_PluginBase):
                               text=f"目标目录获取失败或在115中不存在: {target_dir}")
             return
 
-        # ---- 提取目录ID，全程保持字符串，防止大整数精度丢失 ----
         cid_str = None
         for attr in ['fileid', 'id', 'item_id', 'fid', 'wp_path_id']:
             val = getattr(folder_item, attr, None)
@@ -218,7 +217,7 @@ class movie115_organizer(_PluginBase):
             cid_str = "0"
             logger.warning(f"【115离线】警告：未能提取到 {target_dir} 的真实目录ID，将退化使用根目录(0)。")
         else:
-            logger.info(f"【115离线】精准捕获真实目标目录ID: {cid_str} (type=str, len={len(cid_str)})")
+            logger.info(f"【115离线】精准捕获真实目标目录ID: {cid_str}")
 
         u115 = self._get_u115()
         if not u115:
@@ -250,18 +249,25 @@ class movie115_organizer(_PluginBase):
         success_count = 0
         fail_count = 0
 
+        # ================================================================
+        # 绝对核心修复：倒置字典优先级！
+        # 把 pid 放第一位，防止 p115client 的 **kwargs 吞噬 wp_path_id 并默认设 0
+        # ================================================================
+        param_variations = [
+            {"pid": cid_str},
+            {"wp_path_id": cid_str},
+            {"folder_id": cid_str},
+            {"cid": cid_str}
+        ]
+
         for url in urls:
             try:
                 res = None
                 is_success = False
 
-                # ================================================================
-                # 关键修复：p115_client 排在候选列表首位，保持原有调用路径
-                #           cid_str 全程为 str，防止大整数 JSON 精度丢失
-                # ================================================================
                 client_candidates = []
                 if p115_client:
-                    client_candidates.append(p115_client)   # ← Cookie 逃生舱优先
+                    client_candidates.append(p115_client)
                 client_candidates.append(u115)
                 if hasattr(u115, 'client'):  client_candidates.append(u115.client)
                 if hasattr(u115, '_client'): client_candidates.append(u115._client)
@@ -274,7 +280,7 @@ class movie115_organizer(_PluginBase):
 
                     # offline_add_urls（批量）
                     if hasattr(cand, 'offline_add_urls'):
-                        for kwargs in [{"wp_path_id": cid_str}, {"pid": cid_str}]:
+                        for kwargs in param_variations:
                             try:
                                 logger.info(f"【115离线】尝试 {cand_name}.offline_add_urls 参数={kwargs}")
                                 res = cand.offline_add_urls([url], **kwargs)
@@ -286,7 +292,7 @@ class movie115_organizer(_PluginBase):
 
                     # offline_add_url（单条）
                     if hasattr(cand, 'offline_add_url'):
-                        for kwargs in [{"wp_path_id": cid_str}, {"pid": cid_str}]:
+                        for kwargs in param_variations:
                             try:
                                 logger.info(f"【115离线】尝试 {cand_name}.offline_add_url 参数={kwargs}")
                                 res = cand.offline_add_url(url, **kwargs)
@@ -298,7 +304,7 @@ class movie115_organizer(_PluginBase):
 
                     # add_offline_task
                     if hasattr(cand, 'add_offline_task'):
-                        for kwargs in [{"wp_path_id": cid_str}, {"folder_id": cid_str}, {"pid": cid_str}]:
+                        for kwargs in param_variations:
                             try:
                                 logger.info(f"【115离线】尝试 {cand_name}.add_offline_task 参数={kwargs}")
                                 res = cand.add_offline_task(url, **kwargs)
@@ -311,7 +317,7 @@ class movie115_organizer(_PluginBase):
                 # 终极兜底
                 if not is_success and hasattr(u115, '_request_api'):
                     try:
-                        logger.info("【115离线】常规反射全部失败，启用 _request_api 强制盲打（字符串传参）...")
+                        logger.info("【115离线】常规反射全部失败，启用 _request_api 强制盲打...")
                         res = u115._request_api(
                             url="https://proapi.115.com/app/lixian/add_task_url",
                             method="POST",
@@ -348,7 +354,6 @@ class movie115_organizer(_PluginBase):
 
     @staticmethod
     def _is_offline_success(res) -> bool:
-        """统一判断离线接口返回值是否代表成功"""
         if res is True:
             return True
         if isinstance(res, dict):

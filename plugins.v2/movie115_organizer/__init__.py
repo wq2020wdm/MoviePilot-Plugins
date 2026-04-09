@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import inspect
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.7.6"
+    plugin_version = "1.7.7"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -333,11 +332,8 @@ class movie115_organizer(_PluginBase):
         else:
             logger.info(f"【115离线】精准捕获真实目标目录ID: {cid}")
 
-        # 核心防御2：强制转换为 int，满足 p115client 对数字类型的强校验
-        try:
-            cid_val = int(cid) if str(cid).isdigit() else cid
-        except Exception:
-            cid_val = cid
+        # 🚀 绝对核心防御：强制保留字符串格式，避免 JSON/Form 在传输巨大ID时整数溢出！
+        cid_str = str(cid)
 
         u115 = self._get_u115()
         if not u115:
@@ -374,90 +370,73 @@ class movie115_organizer(_PluginBase):
                 res = None
                 is_success = False
                 
-                # 构建可用代理对象的遍历列表
-                client_candidates = []
-                if p115_client:
-                    client_candidates.append(p115_client)
-                if u115:
-                    client_candidates.append(u115)
-                    if hasattr(u115, 'client'):
-                        client_candidates.append(u115.client)
-                    if hasattr(u115, '_client'):
-                        client_candidates.append(u115._client)
-                    if hasattr(u115, 'pan'):
-                        client_candidates.append(u115.pan)
+                # 构造要测试的方法矩阵，优先级：独立客户端 > 系统嵌套客户端 > 系统原生底层
+                client_candidates = [p115_client, u115]
+                if hasattr(u115, 'client'): client_candidates.append(u115.client)
+                if hasattr(u115, '_client'): client_candidates.append(u115._client)
+                if hasattr(u115, 'pan'): client_candidates.append(u115.pan)
 
                 for cand in client_candidates:
-                    if is_success: break
                     if not cand: continue
+                    if is_success: break
                     
-                    # 连同对象内的 .offline 子模块一起检查
-                    targets = [cand]
-                    if hasattr(cand, 'offline'):
-                        targets.append(cand.offline)
-                        
-                    for t in targets:
-                        if is_success: break
-                        
-                        # 遍历所有已知的离线方法变体
-                        for m_name in ['offline_add_url', 'offline_add_urls', 'offline_add_task', 'add_offline_task', 'add_url', 'add_urls']:
-                            if hasattr(t, m_name):
-                                method = getattr(t, m_name)
-                                try:
-                                    # 核心防御1：使用 inspect 反射获取函数定义的真实参数名
-                                    sig = inspect.signature(method)
-                                    valid_params = sig.parameters.keys()
-                                    kwargs = {}
-                                    
-                                    # 绝对精准投喂
-                                    if 'pid' in valid_params:
-                                        kwargs['pid'] = cid_val
-                                    elif 'wp_path_id' in valid_params:
-                                        kwargs['wp_path_id'] = cid_val
-                                    elif 'folder_id' in valid_params:
-                                        kwargs['folder_id'] = cid_val
-                                    elif 'cid' in valid_params:
-                                        kwargs['cid'] = cid_val
-                                    else:
-                                        # 如果以上都没有，为了防 **kwargs，将常见的都传进去
-                                        kwargs['pid'] = cid_val
-                                        kwargs['wp_path_id'] = cid_val
-                                        
-                                    # 判断函数是否期望接收列表
-                                    is_list = ('urls' in valid_params or 'task_urls' in valid_params or 'links' in valid_params or m_name.endswith('s'))
-                                    
-                                    logger.info(f"【115离线】准备调用接口 {type(t).__name__}.{m_name}, 注入参数字典: {kwargs}")
-                                    
-                                    if is_list:
-                                        res = method([url], **kwargs)
-                                    else:
-                                        res = method(url, **kwargs)
-                                        
-                                    is_success = True
-                                    break
-                                except Exception as e:
-                                    logger.debug(f"尝试调用 {type(t).__name__}.{m_name} 失败: {e}")
-                
-                # 如果各种方法都失败了，最后使用原生接口盲打兜底
+                    # === 策略1：离线添加任务变体 ===
+                    if hasattr(cand, 'offline_add_urls'):
+                        try:
+                            logger.info(f"【115离线】尝试调用 {type(cand).__name__}.offline_add_urls, wp_path_id='{cid_str}'")
+                            res = cand.offline_add_urls([url], wp_path_id=cid_str)
+                            is_success = True; break
+                        except Exception:
+                            try:
+                                res = cand.offline_add_urls([url], pid=cid_str)
+                                is_success = True; break
+                            except Exception: pass
+                            
+                    if hasattr(cand, 'offline_add_url'):
+                        try:
+                            logger.info(f"【115离线】尝试调用 {type(cand).__name__}.offline_add_url, wp_path_id='{cid_str}'")
+                            res = cand.offline_add_url(url, wp_path_id=cid_str)
+                            is_success = True; break
+                        except Exception:
+                            try:
+                                res = cand.offline_add_url(url, pid=cid_str)
+                                is_success = True; break
+                            except Exception: pass
+
+                    if hasattr(cand, 'add_offline_task'):
+                        try:
+                            logger.info(f"【115离线】尝试调用 {type(cand).__name__}.add_offline_task, wp_path_id='{cid_str}'")
+                            res = cand.add_offline_task(url, wp_path_id=cid_str)
+                            is_success = True; break
+                        except Exception:
+                            try:
+                                res = cand.add_offline_task(url, folder_id=cid_str)
+                                is_success = True; break
+                            except Exception: pass
+                            try:
+                                res = cand.add_offline_task(url, pid=cid_str)
+                                is_success = True; break
+                            except Exception: pass
+
+                # === 策略2：底层盲打兜底 ===
                 if not is_success and hasattr(u115, '_request_api'):
                     try:
-                        logger.info("【115离线】常规反射全部失败，启用 _request_api 原生接口强制盲打...")
+                        logger.info("【115离线】常规反射失败，启用 _request_api 强制盲打...")
                         res = u115._request_api(
                             url="https://proapi.115.com/app/lixian/add_task_url",
                             method="POST",
-                            data={"url": url, "wp_path_id": str(cid)}
+                            data={"url": url, "wp_path_id": cid_str}
                         )
                         if isinstance(res, dict) and res.get("state"):
                             is_success = True
-                    except Exception:
-                        pass
-                
+                    except Exception as e:
+                        logger.debug(f"盲打失败: {e}")
+
                 if not is_success:
                     raise NotImplementedError("没有任何可用的底层离线下载通道。请在插件设置中填入 [115 独立 Cookie] 启用逃生舱功能。")
 
-                if is_success:
-                    logger.info(f"【115离线】添加任务成功 (目标目录ID: {cid})，返回: {res}")
-                    success_count += 1
+                logger.info(f"【115离线】添加任务成功 (目标目录ID: {cid_str})，返回结果: {res}")
+                success_count += 1
             except Exception as e:
                 logger.error(f"【115离线】添加任务失败 {url[:40]}: {e}", exc_info=True)
                 fail_count += 1

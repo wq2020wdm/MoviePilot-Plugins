@@ -510,3 +510,243 @@ class movie115_organizer(_PluginBase):
 
             if self._notify and total_moved > 0:
                 self.post_message(
+                    mtype=NotificationType.SiteMessage,
+                    title="115目录洗白整理完成",
+                    text=f"本次共整理并移动了 {total_moved} 个文件夹，生成 STRM {total_strm} 个。"
+                )
+
+            if total_strm > 0 and self._mdcx_container.strip():
+                self._restart_mdcx(self._mdcx_container.strip())
+        finally:
+            self._lock.release()
+
+    def _process_folder(self, storage: StorageChain, folder: FileItem) -> Tuple[bool, int]:
+        fname = folder.name
+        threshold_bytes = self._size_threshold_mb * 1024 * 1024
+        
+        logger.info(f"【115整理】>>> 开始处理子文件夹: {fname}")
+
+        files = storage.list_files(folder) or []
+        all_files = [f for f in files if f.type == "file"]
+        
+        if not all_files:
+            logger.info(f"【115整理】>>> 文件夹 [{fname}] 为空(可能是下载中)，跳过处理。")
+            return False, 0
+
+        small = [f for f in all_files if (f.size or 0) < threshold_bytes]
+        logger.info(f"【115整理】>>> 文件夹 [{fname}] 找到 {len(all_files)} 个文件，其中 {len(small)} 个小于阈值。")
+        
+        for sf in small:
+            try:
+                storage.delete_file(sf)
+                logger.debug(f"【115整理】已删除小文件: {sf.name}")
+            except Exception as e:
+                logger.warning(f"【115整理】删除小文件 {sf.name} 失败: {e}")
+
+        files_after = storage.list_files(folder) or []
+        remaining = [f for f in files_after if f.type == "file"]
+        still_small = [f for f in remaining if (f.size or 0) < threshold_bytes]
+        
+        if not remaining or still_small:
+            logger.info(f"【115整理】>>> 文件夹 [{fname}] 清理后暂不符合移动条件，跳过移动。")
+            return False, 0
+
+        strm_targets: List[Tuple[str, str]] = []
+        need_pickcode = "{pick_code}" in self._strm_template
+
+        for bf in [f for f in remaining if (f.size or 0) >= threshold_bytes]:
+            pickcode = (getattr(bf, "pickcode", None) or "") if need_pickcode else ""
+            if "@" in bf.name:
+                new_fname = bf.name.split("@")[-1]
+                try:
+                    ok = storage.rename_file(bf, new_fname)
+                    strm_targets.append((new_fname if ok else bf.name, pickcode))
+                    logger.info(f"【115整理】去@重命名成功: {bf.name} -> {new_fname}")
+                except Exception as e:
+                    logger.warning(f"【115整理】重命名失败 {bf.name}: {e}")
+                    strm_targets.append((bf.name, pickcode))
+            else:
+                strm_targets.append((bf.name, pickcode))
+
+        target_path = self._target_path.rstrip("/")
+        logger.info(f"【115整理】开始移动整个文件夹 [{fname}] 到 -> {target_path}")
+        ok = self._do_move(folder, target_path)
+        
+        if not ok:
+            logger.error(f"【115整理】文件夹 [{fname}] 移动失败。")
+            return False, 0
+            
+        logger.info(f"【115整理】文件夹 [{fname}] 移动成功！")
+
+        strm_count = 0
+        if self._strm_enabled and self._strm_local_path.strip():
+            for file_name, pickcode in strm_targets:
+                if self._generate_strm(fname, file_name, pickcode, target_path):
+                    strm_count += 1
+
+        return True, strm_count
+
+    def _generate_strm(self, folder_name: str, file_name: str,
+                       pickcode: str, cloud_target_path: str) -> bool:
+        try:
+            local_dir = Path(self._strm_local_path.rstrip("/")) / folder_name
+            local_dir.mkdir(parents=True, exist_ok=True)
+            stem = Path(file_name).stem
+            strm_file = local_dir / f"{stem}.strm"
+            cloud_file = f"{cloud_target_path}/{folder_name}/{file_name}"
+            content = (self._strm_template
+                       .replace("{cloud_file}", cloud_file)
+                       .replace("{pick_code}", pickcode))
+            strm_file.write_text(content, encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
+    def _restart_mdcx(self, container_name: str):
+        import socket
+        sock_path = "/var/run/docker.sock"
+        if not os.path.exists(sock_path): return
+        try:
+            request = (f"POST /containers/{container_name}/restart HTTP/1.1\r\n"
+                       f"Host: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(10)
+            sock.connect(sock_path)
+            sock.sendall(request.encode("utf-8"))
+            sock.close()
+        except Exception:
+            pass
+
+    def _do_move(self, src: FileItem, target_path: str) -> bool:
+        u115 = self._get_u115()
+        if u115 is None: return False
+        dst_path = Path(target_path)
+        try:
+            return bool(u115.move(src, dst_path, src.name))
+        except Exception:
+            return False
+
+    def _get_fileitem(self, storage: StorageChain, path: str) -> Optional[FileItem]:
+        try:
+            parts = [p for p in path.strip("/").split("/") if p]
+            if not parts: return None
+            
+            logger.info(f"【115整理】开始逐层解析云端路径: /{'/'.join(parts)}")
+            root_item = FileItem(storage="u115", fileid="0", path="/", type="dir", name="")
+            current_items = storage.list_files(root_item) or []
+            
+            if not current_items:
+                logger.error("【115整理】解析失败：无法获取115根目录数据。")
+                return None
+                
+            current_item = None
+            for i, part in enumerate(parts):
+                matched = next((item for item in current_items if item.name == part), None)
+                if not matched:
+                    avail_dirs = [item.name for item in current_items if item.type == 'dir'][:10]
+                    logger.warning(f"【115整理】路径断裂：在当前层级找不到名为 '{part}' 的文件夹。当前可用文件夹包含: {avail_dirs}...")
+                    return None
+                current_item = matched
+                if i < len(parts) - 1:
+                    current_items = storage.list_files(current_item) or []
+                    
+            logger.info(f"【115整理】路径解析成功！目标文件夹 [{current_item.name}]")
+            return current_item
+        except Exception as e:
+            logger.error(f"【115整理】路径解析异常: {e}", exc_info=True)
+            return None
+
+    @staticmethod
+    def _fmt(size_bytes: Optional[int]) -> str:
+        if not size_bytes: return "0B"
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size_bytes < 1024: return f"{size_bytes:.1f}{unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.1f}TB"
+
+    def _current_config(self) -> dict:
+        return {
+            "enabled": self._enabled,
+            "cron": self._cron,
+            "monitor_paths": self._monitor_paths,
+            "target_path": self._target_path,
+            "cloud_download_dir": self._cloud_download_dir,
+            "u115_cookie": self._u115_cookie,
+            "size_threshold_mb": self._size_threshold_mb,
+            "notify": self._notify,
+            "strm_enabled": self._strm_enabled,
+            "strm_local_path": self._strm_local_path,
+            "strm_template": self._strm_template,
+            "mdcx_container": self._mdcx_container,
+        }
+
+    # ═══════════════════════════════════════════════════════════
+    #  V2 接口
+    # ═══════════════════════════════════════════════════════════
+
+    def get_api(self) -> List[dict]: return []
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        if self._enabled and self._cron:
+            from apscheduler.triggers.cron import CronTrigger
+            return [{
+                "id": "movie115_organizer_task",
+                "name": "115整理服务",
+                "trigger": CronTrigger.from_crontab(self._cron),
+                "func": self.execute
+            }]
+        return []
+
+    def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        return [
+            {
+                "component": "VForm",
+                "content": [
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "发送通知"}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "strm_enabled", "label": "生成STRM"}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [{"component": "VSwitch", "props": {"model": "run_once", "label": "保存后运行一次"}}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "cron", "label": "Cron 表达式", "hint": "建议间隔≥30分钟，如 0 */2 * * *"}}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "size_threshold_mb", "label": "垃圾文件阈值 (MB)", "type": "number"}}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "monitor_paths", "label": "监控目录（每行一个115路径）", "placeholder": "格式如: /接收/temp/小姐姐", "rows": 3}}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "target_path", "label": "115 移动目标路径", "placeholder": "格式如: /影视/电影"}}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "cloud_download_dir", "label": "115云下载目录 (离线下载默认路径)", "placeholder": "格式如: /云下载"}}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "u115_cookie", "label": "115 独立 Cookie (离线逃生舱)", "hint": "若你的系统架构阻断了自动提取，请在此手动填入115网页端 Cookie以强行接管离线功能"}}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "strm_local_path", "label": "STRM 本地根目录（需开启生成STRM）", "placeholder": "/media/strm/电影"}}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "strm_template", "label": "STRM 内容模板", "hint": "{cloud_file}=云端完整路径  {pick_code}=115 pickcode"}}]},
+                    ]},
+                    {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "mdcx_container", "label": "mdcx 容器名", "placeholder": "mdcx", "hint": "生成STRM后将自动重启该容器触发刮削（留空则不重启）"}}]},
+                    ]},
+                ]
+            }
+        ], {
+            "enabled": False,
+            "cron": "0 */2 * * *",
+            "monitor_paths": "",
+            "target_path": "",
+            "cloud_download_dir": "",
+            "u115_cookie": "",
+            "size_threshold_mb": 500,
+            "notify": True,
+            "run_once": False,
+            "strm_enabled": False,
+            "strm_local_path": "",
+            "strm_template": "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}",
+            "mdcx_container": "",
+        }

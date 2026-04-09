@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.0.0"
+    plugin_version = "2.3.0"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -201,36 +201,30 @@ class movie115_organizer(_PluginBase):
                               text=f"目标目录获取失败或在115中不存在: {target_dir}")
             return
 
-        # ---------------------------------------------------------
-        # 提取真实目录 ID，转换为安全的 Integer 以满足后端强校验
-        # ---------------------------------------------------------
         cid_str = None
         for attr in ['fileid', 'id', 'item_id', 'fid', 'wp_path_id']:
             val = getattr(folder_item, attr, None)
             if val is not None and str(val).strip() not in ("", "0"):
                 cid_str = str(val).strip()
                 break
+        
         if not cid_str and hasattr(folder_item, 'extra') and isinstance(folder_item.extra, dict):
             for attr in ['fileid', 'id', 'item_id', 'fid']:
                 val = folder_item.extra.get(attr)
                 if val is not None and str(val).strip() not in ("", "0"):
                     cid_str = str(val).strip()
                     break
-                    
-        if not cid_str:
-            logger.warning(f"【115离线】未能提取到 {target_dir} 的真实目录ID，将退化使用根目录(0)。")
-            cid_int = 0
+        
+        cid_int = int(cid_str) if cid_str and cid_str.isdigit() else 0
+        if cid_int == 0:
+            logger.warning(f"【115离线】警告：未能提取到 {target_dir} 的真实目录ID，将退化使用根目录(0)。")
         else:
-            logger.info(f"【115离线】精准捕获真实目标目录ID: {cid_str}")
-            cid_int = int(cid_str) if str(cid_str).isdigit() else 0
+            logger.info(f"【115离线】精准捕获真实目标目录ID: {cid_int}")
 
         u115 = self._get_u115()
-        if not u115:
-            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="获取 115 实例失败，无法发起离线。")
-            return
-
         cookie = self._u115_cookie.strip()
-        if not cookie and hasattr(u115, 'get_config'):
+        
+        if not cookie and u115 and hasattr(u115, 'get_config'):
             try:
                 conf = u115.get_config()
                 if isinstance(conf, dict):
@@ -246,8 +240,6 @@ class movie115_organizer(_PluginBase):
                 from p115client import P115Client
                 p115_client = P115Client(cookie)
                 logger.info("【115离线】检测到 Cookie，成功初始化 P115Client 独立逃生舱。")
-            except ImportError:
-                logger.warning("【115离线】找到 Cookie 但系统中未安装 p115client 依赖库。")
             except Exception as e:
                 logger.error(f"【115离线】P115Client 初始化报错: {e}")
 
@@ -255,56 +247,50 @@ class movie115_organizer(_PluginBase):
         fail_count = 0
 
         for url in urls:
-            is_success = False
-            res = None
-
             try:
+                is_success = False
+                res = None
+
                 # ================================================================
-                # 破壁方案 1：独立逃生舱（绝对无歧义传参）
-                # 明确只传唯一正确的 wp_path_id 整数，或者利用库原生的 path 字符串解析
+                # 破局点：像素级复刻参考代码的 Payload 构造
+                # 把链接写成 url[0]，并把 wp_path_id 直接封进同一个字典里
                 # ================================================================
+                payload = {
+                    "url[0]": url.strip(),
+                    "wp_path_id": cid_int
+                }
+
+                logger.info(f"【115离线】完美字典构造完成: {payload}")
+
+                # 1. 尝试 Cookie 独立逃生舱
                 if p115_client:
-                    # 尝试方法A：传最纯正的底层 ID
-                    logger.info(f"【115离线】尝试 P115Client.offline_add_urls(wp_path_id={cid_int})")
                     try:
-                        res = p115_client.offline_add_urls([url], wp_path_id=cid_int)
+                        logger.info("【115离线】向 P115Client 发送 payload...")
+                        res = p115_client.offline_add_urls(payload)
                         if self._is_offline_success(res):
                             is_success = True
                     except Exception as e:
-                        logger.debug(f"wp_path_id 尝试被拒: {e}")
-
-                    # 尝试方法B：如果 A 失败，直接传绝对路径字符串给它，让它自己去算！
-                    if not is_success:
-                        logger.info(f"【115离线】尝试 P115Client.offline_add_urls(savepath='{target_dir}')")
+                        logger.debug(f"P115Client Payload 调用失败: {e}")
+                
+                # 2. 尝试 MP 底层客户端
+                if not is_success and u115:
+                    if hasattr(u115, 'client') and hasattr(u115.client, 'offline_add_urls'):
                         try:
-                            res = p115_client.offline_add_urls([url], savepath=target_dir)
+                            logger.info("【115离线】向 MP底层客户端 发送 payload...")
+                            res = u115.client.offline_add_urls(payload)
                             if self._is_offline_success(res):
                                 is_success = True
                         except Exception as e:
-                            logger.debug(f"savepath 尝试被拒: {e}")
+                            logger.debug(f"u115.client Payload 调用失败: {e}")
 
-                # ================================================================
-                # 破壁方案 2：MP 自带的 U115Pan (官方标准方法调用)
-                # ================================================================
-                if not is_success and hasattr(u115, 'add_offline_task'):
-                    logger.info(f"【115离线】尝试 MP 原生 u115.add_offline_task(folder_id='{cid_str}')")
-                    try:
-                        res = u115.add_offline_task(url, folder_id=cid_str)
-                        if self._is_offline_success(res):
-                            is_success = True
-                    except Exception as e:
-                        logger.debug(f"u115.add_offline_task 异常: {e}")
-
-                # ================================================================
-                # 破壁方案 3：_request_api 强制盲打
-                # ================================================================
+                # 3. 终极盲打（这其实就是 P115Client 底层的真实请求姿势）
                 if not is_success and hasattr(u115, '_request_api'):
-                    logger.info("【115离线】常规通道失效，启动 _request_api 强制盲打...")
+                    logger.info("【115离线】启用 _request_api 强制盲打 Payload...")
                     try:
                         res = u115._request_api(
                             url="https://proapi.115.com/app/lixian/add_task_url",
                             method="POST",
-                            data={"url": url, "wp_path_id": cid_int}
+                            data=payload
                         )
                         if self._is_offline_success(res):
                             is_success = True
@@ -314,7 +300,7 @@ class movie115_organizer(_PluginBase):
                 if not is_success:
                     raise NotImplementedError("底层离线接口调用全部失效，请确认填入了正确的 115 独立 Cookie。")
 
-                logger.info(f"【115离线】添加任务成功 (最终目录ID/路径: {cid_int})，返回结果: {res}")
+                logger.info(f"【115离线】添加任务成功 (最终目录ID: {cid_int})，返回结果: {res}")
                 success_count += 1
 
             except Exception as e:

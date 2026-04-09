@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.6.1"
+    plugin_version = "1.6.3"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -244,37 +244,27 @@ class movie115_organizer(_PluginBase):
             threading.Thread(target=self.execute, daemon=True).start()
 
         elif action == "cd":
-            # 修复：防止 args为空列表 时错误地将 text 覆盖为空字符串
-            text = str(event.event_data.get("text") or "")
-            args = event.event_data.get("args")
+            # 关键修复：直接使用 arg_str 获取命令后面的所有参数
+            arg_str = event.event_data.get("arg_str", "")
             
-            if args:
-                if isinstance(args, str):
-                    text = args
-                elif isinstance(args, (list, tuple)) and len(args) > 0:
-                    text = " ".join(str(a) for a in args)
+            if not arg_str:
+                self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="未提供下载链接。")
+                return
 
-            if not text and hasattr(event, 'text'):
-                text = str(getattr(event, 'text') or "")
-                
-            text = text.strip()
-            
-            logger.info(f"【115离线】准备处理Bot投递文本: {text}")
+            logger.info(f"【115离线】获取到Bot参数: {arg_str}")
 
             import threading
-            threading.Thread(target=self._handle_cd_task, args=(text,), daemon=True).start()
+            threading.Thread(target=self._handle_cd_task, args=(arg_str,), daemon=True).start()
 
     # ═══════════════════════════════════════════════════════════
     #  离线下载核心逻辑
     # ═══════════════════════════════════════════════════════════
 
     def _parse_cd_args(self, text: str) -> Tuple[List[str], str]:
-        # 移除头部命令及其后的空白符
-        text = re.sub(r'^/cd\s*', '', text, flags=re.IGNORECASE).strip()
-        
+        """解析离线下载文本参数，剥离出下载链接与目标目录"""
         # 强制在各个协议头前加空格（不管是否连在一起，统一补空格）
-        text = re.sub(r'(https?://|ftp://|magnet:\?|ed2k://)', r' \1', text, flags=re.IGNORECASE)
-
+        text = re.sub(r'(?<!^)(https?://|ftp://|magnet:\?|ed2k://)', r' \1', str(text), flags=re.IGNORECASE)
+        
         # 此时可以用标准空白符切分了，它会自动处理新行和连在一起的情况
         parts = text.split()
         urls = []
@@ -290,10 +280,6 @@ class movie115_organizer(_PluginBase):
         return urls, target_dir
 
     def _handle_cd_task(self, text: str):
-        if not text:
-            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="未提供下载链接或格式提取失败。")
-            return
-
         urls, target_dir = self._parse_cd_args(text)
         
         if not target_dir:
@@ -303,12 +289,12 @@ class movie115_organizer(_PluginBase):
             self.post_message(
                 mtype=NotificationType.SiteMessage, 
                 title="115离线下载", 
-                text=f"未识别到有效的下载链接。(支持 http/ftp/magnet/ed2k 开头)\n提取到的内容为: {text[:50]}"
+                text=f"未识别到支持的链接。(支持 http/ftp/magnet/ed2k 开头)\n提取到的内容为: {text[:50]}"
             )
             return
 
         if not target_dir:
-            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="指令未指定目录，且插件未配置默认云下载目录。")
+            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="指令未指定目录，且未配置默认云下载目录，无法执行离线下载。")
             return
 
         logger.info(f"【115离线】共发现 {len(urls)} 个链接，目标目录: {target_dir}")
@@ -316,13 +302,13 @@ class movie115_organizer(_PluginBase):
         folder_item = self._get_fileitem(storage, target_dir)
         
         if not folder_item:
-            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text=f"目标目录获取失败或不存在: {target_dir}")
+            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text=f"目标目录获取失败或在115中不存在: {target_dir}")
             return
 
         cid = getattr(folder_item, "fileid", "0")
         u115 = self._get_u115()
         if not u115:
-            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="获取 115 实例失败。")
+            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="获取 115 实例失败，无法发起离线。")
             return
 
         success_count = 0
@@ -335,7 +321,7 @@ class movie115_organizer(_PluginBase):
                 elif hasattr(u115, 'client') and hasattr(u115.client, 'offline') and hasattr(u115.client.offline, 'add_url'):
                     res = u115.client.offline.add_url(url, cid=cid)
                 else:
-                    raise NotImplementedError("底层未暴露离线下载方法")
+                    raise NotImplementedError("底层115模块未暴露离线下载方法")
                 
                 logger.info(f"【115离线】添加任务成功: {url[:40]}... 返回: {res}")
                 success_count += 1
@@ -350,7 +336,7 @@ class movie115_organizer(_PluginBase):
         )
 
         if success_count > 0:
-            logger.info("【115离线】触发成功，5秒后自动发起目录整理...")
+            logger.info("【115离线】有任务添加成功，5秒后自动发起一次目录整理...")
             import threading
             def trigger_clean():
                 time.sleep(5)

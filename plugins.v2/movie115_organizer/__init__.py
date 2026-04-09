@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.6.0"
+    plugin_version = "1.6.1"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -244,15 +244,22 @@ class movie115_organizer(_PluginBase):
             threading.Thread(target=self.execute, daemon=True).start()
 
         elif action == "cd":
-            text = event.event_data.get("text", "")
-            args = event.event_data.get("args", "")
-            if isinstance(args, str) and args:
-                text = args
-            elif isinstance(args, list):
-                text = " ".join(args)
+            # 修复：防止 args为空列表 时错误地将 text 覆盖为空字符串
+            text = str(event.event_data.get("text") or "")
+            args = event.event_data.get("args")
+            
+            if args:
+                if isinstance(args, str):
+                    text = args
+                elif isinstance(args, (list, tuple)) and len(args) > 0:
+                    text = " ".join(str(a) for a in args)
 
             if not text and hasattr(event, 'text'):
-                text = event.text
+                text = str(getattr(event, 'text') or "")
+                
+            text = text.strip()
+            
+            logger.info(f"【115离线】准备处理Bot投递文本: {text}")
 
             import threading
             threading.Thread(target=self._handle_cd_task, args=(text,), daemon=True).start()
@@ -262,9 +269,13 @@ class movie115_organizer(_PluginBase):
     # ═══════════════════════════════════════════════════════════
 
     def _parse_cd_args(self, text: str) -> Tuple[List[str], str]:
-        text = re.sub(r'^/cd\b', '', text).strip()
-        text = re.sub(r'(?<!^)(https?://|ftp://|magnet:\?|ed2k://)', r' \1', text, flags=re.IGNORECASE)
+        # 移除头部命令及其后的空白符
+        text = re.sub(r'^/cd\s*', '', text, flags=re.IGNORECASE).strip()
+        
+        # 强制在各个协议头前加空格（不管是否连在一起，统一补空格）
+        text = re.sub(r'(https?://|ftp://|magnet:\?|ed2k://)', r' \1', text, flags=re.IGNORECASE)
 
+        # 此时可以用标准空白符切分了，它会自动处理新行和连在一起的情况
         parts = text.split()
         urls = []
         dir_parts = []
@@ -280,7 +291,7 @@ class movie115_organizer(_PluginBase):
 
     def _handle_cd_task(self, text: str):
         if not text:
-            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="未提供下载链接。")
+            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="未提供下载链接或格式提取失败。")
             return
 
         urls, target_dir = self._parse_cd_args(text)
@@ -289,14 +300,18 @@ class movie115_organizer(_PluginBase):
             target_dir = self._cloud_download_dir
 
         if not urls:
-            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="未识别到有效的下载链接。")
+            self.post_message(
+                mtype=NotificationType.SiteMessage, 
+                title="115离线下载", 
+                text=f"未识别到有效的下载链接。(支持 http/ftp/magnet/ed2k 开头)\n提取到的内容为: {text[:50]}"
+            )
             return
 
         if not target_dir:
-            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="指令未指定目录，且未配置默认云下载目录。")
+            self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="指令未指定目录，且插件未配置默认云下载目录。")
             return
 
-        logger.info(f"【115离线】准备处理 {len(urls)} 个链接，目标目录: {target_dir}")
+        logger.info(f"【115离线】共发现 {len(urls)} 个链接，目标目录: {target_dir}")
         storage = StorageChain()
         folder_item = self._get_fileitem(storage, target_dir)
         
@@ -334,12 +349,11 @@ class movie115_organizer(_PluginBase):
             text=f"任务添加完毕。\n✅ 成功: {success_count} 个\n❌ 失败: {fail_count} 个\n📁 目标目录: {target_dir}"
         )
 
-        # 功能：离线任务添加成功后，自动触发一次整理
         if success_count > 0:
             logger.info("【115离线】触发成功，5秒后自动发起目录整理...")
             import threading
             def trigger_clean():
-                time.sleep(5)  # 稍微延时避免刚添加时发生资源争抢
+                time.sleep(5)
                 self.execute()
             threading.Thread(target=trigger_clean, daemon=True).start()
 
@@ -429,8 +443,6 @@ class movie115_organizer(_PluginBase):
             return False, 0
 
         strm_targets: List[Tuple[str, str]] = []
-        
-        # 功能：判断模板中是否有 {pick_code} 决定是否读取 pickcode
         need_pickcode = "{pick_code}" in self._strm_template
 
         for bf in [f for f in remaining if (f.size or 0) >= threshold_bytes]:

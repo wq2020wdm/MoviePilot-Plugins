@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.7.7"
+    plugin_version = "1.8.0"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -32,7 +32,7 @@ class movie115_organizer(_PluginBase):
     _monitor_paths: str = ""
     _target_path: str = ""
     _cloud_download_dir: str = ""
-    _u115_cookie: str = ""  
+    _u115_cookie: str = ""
     _size_threshold_mb: int = 500
     _notify: bool = True
     _run_once: bool = False
@@ -256,7 +256,7 @@ class movie115_organizer(_PluginBase):
 
         elif action == "cd":
             arg_str = event.event_data.get("arg_str", "")
-            
+
             if not arg_str:
                 self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="未提供下载链接。")
                 return
@@ -287,14 +287,14 @@ class movie115_organizer(_PluginBase):
 
     def _handle_cd_task(self, text: str):
         urls, target_dir = self._parse_cd_args(text)
-        
+
         if not target_dir:
             target_dir = self._cloud_download_dir
 
         if not urls:
             self.post_message(
-                mtype=NotificationType.SiteMessage, 
-                title="115离线下载", 
+                mtype=NotificationType.SiteMessage,
+                title="115离线下载",
                 text=f"未识别到支持的链接。(支持 http/ftp/magnet/ed2k 开头)\n提取到的内容为: {text[:50]}"
             )
             return
@@ -306,40 +306,46 @@ class movie115_organizer(_PluginBase):
         logger.info(f"【115离线】共发现 {len(urls)} 个链接，目标路径: {target_dir}")
         storage = StorageChain()
         folder_item = self._get_fileitem(storage, target_dir)
-        
+
         if not folder_item:
             self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text=f"目标目录获取失败或在115中不存在: {target_dir}")
             return
 
-        # ---- 全方位提取真实目录 ID ----
-        cid = None
+        # ---- 全方位提取真实目录 ID，全程保持字符串，防止大整数精度丢失 ----
+        cid_str = None
         for attr in ['fileid', 'id', 'item_id', 'fid', 'wp_path_id']:
             val = getattr(folder_item, attr, None)
-            if val and str(val) != "0":
-                cid = str(val)
+            # 转为字符串后验证非空非零
+            if val is not None and str(val).strip() not in ("", "0"):
+                cid_str = str(val).strip()
                 break
-                
-        if not cid and hasattr(folder_item, 'extra') and isinstance(folder_item.extra, dict):
+
+        if not cid_str and hasattr(folder_item, 'extra') and isinstance(folder_item.extra, dict):
             for attr in ['fileid', 'id', 'item_id', 'fid']:
                 val = folder_item.extra.get(attr)
-                if val and str(val) != "0":
-                    cid = str(val)
+                if val is not None and str(val).strip() not in ("", "0"):
+                    cid_str = str(val).strip()
                     break
-                    
-        if not cid:
-            cid = "0"
+
+        if not cid_str:
+            cid_str = "0"
             logger.warning(f"【115离线】警告：未能提取到 {target_dir} 的真实目录ID，将退化使用根目录(0)。")
         else:
-            logger.info(f"【115离线】精准捕获真实目标目录ID: {cid}")
+            logger.info(f"【115离线】精准捕获真实目标目录ID: {cid_str} (type=str, len={len(cid_str)})")
 
-        # 🚀 绝对核心防御：强制保留字符串格式，避免 JSON/Form 在传输巨大ID时整数溢出！
-        cid_str = str(cid)
+        # ✅ 精度自检：115 目录ID超过 JS 安全整数范围(2^53)，必须以纯字符串传参
+        try:
+            if str(int(cid_str)) != cid_str:
+                logger.error(f"【115离线】⚠️ 精度自检异常：cid_str='{cid_str}' 经 int() 转换后不一致，存在精度风险！")
+        except ValueError:
+            logger.error(f"【115离线】⚠️ cid_str='{cid_str}' 无法转为整数，格式异常。")
 
         u115 = self._get_u115()
         if not u115:
             self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="获取 115 实例失败，无法发起离线。")
             return
 
+        # 获取 Cookie
         cookie = self._u115_cookie.strip()
         if not cookie and hasattr(u115, 'get_config'):
             try:
@@ -366,79 +372,57 @@ class movie115_organizer(_PluginBase):
         fail_count = 0
 
         for url in urls:
+            is_success = False
+            res = None
             try:
-                res = None
-                is_success = False
-                
-                # 构造要测试的方法矩阵，优先级：独立客户端 > 系统嵌套客户端 > 系统原生底层
-                client_candidates = [p115_client, u115]
-                if hasattr(u115, 'client'): client_candidates.append(u115.client)
-                if hasattr(u115, '_client'): client_candidates.append(u115._client)
-                if hasattr(u115, 'pan'): client_candidates.append(u115.pan)
+                # ==============================================================
+                # 策略1：优先使用 P115Client 直接 POST 官方接口（字符串传参，杜绝精度丢失）
+                # ==============================================================
+                if p115_client:
+                    is_success, res = self._offline_add_via_direct_post(p115_client, url, cid_str)
 
-                for cand in client_candidates:
-                    if not cand: continue
-                    if is_success: break
-                    
-                    # === 策略1：离线添加任务变体 ===
-                    if hasattr(cand, 'offline_add_urls'):
-                        try:
-                            logger.info(f"【115离线】尝试调用 {type(cand).__name__}.offline_add_urls, wp_path_id='{cid_str}'")
-                            res = cand.offline_add_urls([url], wp_path_id=cid_str)
-                            is_success = True; break
-                        except Exception:
-                            try:
-                                res = cand.offline_add_urls([url], pid=cid_str)
-                                is_success = True; break
-                            except Exception: pass
-                            
-                    if hasattr(cand, 'offline_add_url'):
-                        try:
-                            logger.info(f"【115离线】尝试调用 {type(cand).__name__}.offline_add_url, wp_path_id='{cid_str}'")
-                            res = cand.offline_add_url(url, wp_path_id=cid_str)
-                            is_success = True; break
-                        except Exception:
-                            try:
-                                res = cand.offline_add_url(url, pid=cid_str)
-                                is_success = True; break
-                            except Exception: pass
+                # ==============================================================
+                # 策略2：P115Client 直接 POST 失败，尝试反射系统内置客户端的方法
+                # ==============================================================
+                if not is_success:
+                    client_candidates = [u115]
+                    if hasattr(u115, 'client'):  client_candidates.append(u115.client)
+                    if hasattr(u115, '_client'): client_candidates.append(u115._client)
+                    if hasattr(u115, 'pan'):     client_candidates.append(u115.pan)
 
-                    if hasattr(cand, 'add_offline_task'):
-                        try:
-                            logger.info(f"【115离线】尝试调用 {type(cand).__name__}.add_offline_task, wp_path_id='{cid_str}'")
-                            res = cand.add_offline_task(url, wp_path_id=cid_str)
-                            is_success = True; break
-                        except Exception:
-                            try:
-                                res = cand.add_offline_task(url, folder_id=cid_str)
-                                is_success = True; break
-                            except Exception: pass
-                            try:
-                                res = cand.add_offline_task(url, pid=cid_str)
-                                is_success = True; break
-                            except Exception: pass
+                    for cand in client_candidates:
+                        if not cand or is_success:
+                            continue
+                        is_success, res = self._offline_add_via_reflection(cand, url, cid_str)
+                        if is_success:
+                            break
 
-                # === 策略2：底层盲打兜底 ===
+                # ==============================================================
+                # 策略3：终极兜底——直接调用 u115._request_api（字符串传参）
+                # ==============================================================
                 if not is_success and hasattr(u115, '_request_api'):
                     try:
-                        logger.info("【115离线】常规反射失败，启用 _request_api 强制盲打...")
+                        logger.info("【115离线】常规反射全部失败，启用 _request_api 强制盲打（字符串传参）...")
                         res = u115._request_api(
                             url="https://proapi.115.com/app/lixian/add_task_url",
                             method="POST",
-                            data={"url": url, "wp_path_id": cid_str}
+                            data={"url": url, "wp_path_id": cid_str}  # 字符串
                         )
                         if isinstance(res, dict) and res.get("state"):
                             is_success = True
                     except Exception as e:
-                        logger.debug(f"盲打失败: {e}")
+                        logger.debug(f"【115离线】盲打失败: {e}")
 
                 if not is_success:
-                    raise NotImplementedError("没有任何可用的底层离线下载通道。请在插件设置中填入 [115 独立 Cookie] 启用逃生舱功能。")
+                    raise NotImplementedError(
+                        "没有任何可用的底层离线下载通道。请在插件设置中填入 [115 独立 Cookie] 启用逃生舱功能。"
+                    )
 
-                logger.info(f"【115离线】添加任务成功 (目标目录ID: {cid_str})，返回结果: {res}")
+                logger.info(f"【115离线】添加任务成功 (目标目录ID: {cid_str})，返回: {res}")
                 success_count += 1
+
             except Exception as e:
-                logger.error(f"【115离线】添加任务失败 {url[:40]}: {e}", exc_info=True)
+                logger.error(f"【115离线】添加任务失败 {url[:60]}: {e}", exc_info=True)
                 fail_count += 1
 
         self.post_message(
@@ -454,6 +438,94 @@ class movie115_organizer(_PluginBase):
                 time.sleep(5)
                 self.execute()
             threading.Thread(target=trigger_clean, daemon=True).start()
+
+    # ─────────────────────────────────────────────────────────
+    #  离线下载子方法：策略1 - 直接 POST 官方接口（最高优先级）
+    #  核心要点：wp_path_id 全程以字符串传递，防止大整数精度丢失
+    # ─────────────────────────────────────────────────────────
+    def _offline_add_via_direct_post(self, client, url: str, cid_str: str) -> Tuple[bool, Any]:
+        """
+        通过 p115client 的底层 request 方法直接 POST 官方离线接口。
+        wp_path_id 以纯字符串形式注入，彻底规避 JSON 序列化时大整数精度丢失问题。
+        """
+        OFFLINE_API = "https://proapi.115.com/app/lixian/add_task_url"
+
+        # 构造字符串参数字典（绝对不允许出现 int 类型的 cid）
+        payload: Dict[str, str] = {
+            "url": url,
+            "wp_path_id": cid_str,   # ← 必须是 str，115 API 以字符串接收超大 ID
+        }
+        logger.info(f"【115离线】策略1: 直接 POST {OFFLINE_API}, wp_path_id='{cid_str}'")
+
+        # 尝试不同的底层请求方法名
+        for method_name in ("request", "_request", "http_request", "call_api"):
+            fn = getattr(client, method_name, None)
+            if not callable(fn):
+                continue
+            try:
+                res = fn(url=OFFLINE_API, method="POST", data=payload)
+                if isinstance(res, dict) and res.get("state"):
+                    logger.info(f"【115离线】策略1 ({method_name}) 成功: {res}")
+                    return True, res
+                else:
+                    logger.debug(f"【115离线】策略1 ({method_name}) 返回非成功: {res}")
+            except Exception as e:
+                logger.debug(f"【115离线】策略1 ({method_name}) 异常: {e}")
+
+        return False, None
+
+    # ─────────────────────────────────────────────────────────
+    #  离线下载子方法：策略2 - 反射调用封装方法（字符串传参）
+    # ─────────────────────────────────────────────────────────
+    def _offline_add_via_reflection(self, cand, url: str, cid_str: str) -> Tuple[bool, Any]:
+        """
+        尝试调用客户端已封装的离线下载方法。
+        所有目录 ID 参数均以字符串传入，防止内部 int 转换导致精度丢失。
+        """
+        cand_name = type(cand).__name__
+
+        def _try(fn_name: str, **kwargs) -> Tuple[bool, Any]:
+            fn = getattr(cand, fn_name, None)
+            if not callable(fn):
+                return False, None
+            logger.info(f"【115离线】策略2: 尝试 {cand_name}.{fn_name}, 参数={kwargs}")
+            try:
+                res = fn(url, **kwargs)   # 所有 kwargs 值均为 str
+                # 判断是否成功：返回字典且 state=True，或直接返回 True
+                success = (isinstance(res, dict) and res.get("state")) or res is True
+                if success:
+                    logger.info(f"【115离线】策略2 ({cand_name}.{fn_name}) 成功: {res}")
+                return success, res
+            except Exception as e:
+                logger.debug(f"【115离线】策略2 ({cand_name}.{fn_name}) 异常: {e}")
+                return False, None
+
+        # offline_add_urls（复数）
+        if hasattr(cand, 'offline_add_urls') and callable(cand.offline_add_urls):
+            for kwargs in [{"wp_path_id": cid_str}, {"pid": cid_str}]:
+                try:
+                    logger.info(f"【115离线】策略2: 尝试 {cand_name}.offline_add_urls, 参数={kwargs}")
+                    res = cand.offline_add_urls([url], **kwargs)
+                    success = (isinstance(res, dict) and res.get("state")) or res is True
+                    if success:
+                        logger.info(f"【115离线】策略2 (offline_add_urls) 成功: {res}")
+                        return True, res
+                except Exception as e:
+                    logger.debug(f"【115离线】策略2 offline_add_urls {kwargs} 异常: {e}")
+
+        # offline_add_url（单数）
+        for kwargs in [{"wp_path_id": cid_str}, {"pid": cid_str}]:
+            ok, res = _try("offline_add_url", **kwargs)
+            if ok:
+                return True, res
+
+        # add_offline_task
+        for kwargs in [{"wp_path_id": cid_str}, {"folder_id": cid_str}, {"pid": cid_str}]:
+            ok, res = _try("add_offline_task", **kwargs)
+            if ok:
+                return True, res
+
+        return False, None
 
     # ═══════════════════════════════════════════════════════════
     #  获取 U115Pan 实例
@@ -496,14 +568,14 @@ class movie115_organizer(_PluginBase):
                 logger.info(f"【115整理】======================================")
                 logger.info(f"【115整理】开始扫描 115 目录: {monitor_path}")
                 parent_item = self._get_fileitem(storage, monitor_path)
-                
+
                 if not parent_item:
                     logger.warning(f"【115整理】跳过目录 {monitor_path}：底层 API 无法在该层级获取到对应网盘节点。")
                     continue
 
                 children = storage.list_files(parent_item) or []
                 subfolders = [c for c in children if c.type == "dir"]
-                
+
                 logger.info(f"【115整理】[{monitor_path}] 共发现 {len(subfolders)} 个子文件夹需检查。")
 
                 for folder in subfolders:
@@ -527,19 +599,19 @@ class movie115_organizer(_PluginBase):
     def _process_folder(self, storage: StorageChain, folder: FileItem) -> Tuple[bool, int]:
         fname = folder.name
         threshold_bytes = self._size_threshold_mb * 1024 * 1024
-        
+
         logger.info(f"【115整理】>>> 开始处理子文件夹: {fname}")
 
         files = storage.list_files(folder) or []
         all_files = [f for f in files if f.type == "file"]
-        
+
         if not all_files:
             logger.info(f"【115整理】>>> 文件夹 [{fname}] 为空(可能是下载中)，跳过处理。")
             return False, 0
 
         small = [f for f in all_files if (f.size or 0) < threshold_bytes]
         logger.info(f"【115整理】>>> 文件夹 [{fname}] 找到 {len(all_files)} 个文件，其中 {len(small)} 个小于阈值。")
-        
+
         for sf in small:
             try:
                 storage.delete_file(sf)
@@ -550,7 +622,7 @@ class movie115_organizer(_PluginBase):
         files_after = storage.list_files(folder) or []
         remaining = [f for f in files_after if f.type == "file"]
         still_small = [f for f in remaining if (f.size or 0) < threshold_bytes]
-        
+
         if not remaining or still_small:
             logger.info(f"【115整理】>>> 文件夹 [{fname}] 清理后暂不符合移动条件，跳过移动。")
             return False, 0
@@ -575,11 +647,11 @@ class movie115_organizer(_PluginBase):
         target_path = self._target_path.rstrip("/")
         logger.info(f"【115整理】开始移动整个文件夹 [{fname}] 到 -> {target_path}")
         ok = self._do_move(folder, target_path)
-        
+
         if not ok:
             logger.error(f"【115整理】文件夹 [{fname}] 移动失败。")
             return False, 0
-            
+
         logger.info(f"【115整理】文件夹 [{fname}] 移动成功！")
 
         strm_count = 0
@@ -634,15 +706,15 @@ class movie115_organizer(_PluginBase):
         try:
             parts = [p for p in path.strip("/").split("/") if p]
             if not parts: return None
-            
+
             logger.info(f"【115整理】开始逐层解析云端路径: /{'/'.join(parts)}")
             root_item = FileItem(storage="u115", fileid="0", path="/", type="dir", name="")
             current_items = storage.list_files(root_item) or []
-            
+
             if not current_items:
                 logger.error("【115整理】解析失败：无法获取115根目录数据。")
                 return None
-                
+
             current_item = None
             for i, part in enumerate(parts):
                 matched = next((item for item in current_items if item.name == part), None)
@@ -653,7 +725,7 @@ class movie115_organizer(_PluginBase):
                 current_item = matched
                 if i < len(parts) - 1:
                     current_items = storage.list_files(current_item) or []
-                    
+
             logger.info(f"【115整理】路径解析成功！目标文件夹 [{current_item.name}]")
             return current_item
         except Exception as e:

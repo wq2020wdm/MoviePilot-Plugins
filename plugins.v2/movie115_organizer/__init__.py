@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.7.0"
+    plugin_version = "1.7.2"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -32,7 +32,7 @@ class movie115_organizer(_PluginBase):
     _monitor_paths: str = ""
     _target_path: str = ""
     _cloud_download_dir: str = ""
-    _u115_cookie: str = ""  # 新增：独立离线逃生舱 Cookie
+    _u115_cookie: str = ""  
     _size_threshold_mb: int = 500
     _notify: bool = True
     _run_once: bool = False
@@ -317,7 +317,6 @@ class movie115_organizer(_PluginBase):
             self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="获取 115 实例失败，无法发起离线。")
             return
 
-        # ---- 核心提取逻辑：获取可用的 Cookie ----
         cookie = self._u115_cookie.strip()
         if not cookie and hasattr(u115, 'get_config'):
             try:
@@ -329,7 +328,6 @@ class movie115_organizer(_PluginBase):
         if not cookie:
             cookie = os.getenv("U115_COOKIE", "")
 
-        # ---- 初始化逃生舱客户端 ----
         p115_client = None
         if cookie:
             try:
@@ -349,12 +347,13 @@ class movie115_organizer(_PluginBase):
                 res = None
                 is_success = False
                 
-                # 策略1：使用独立的 p115client 逃生舱 (最高优先级)
                 if p115_client:
-                    res = p115_client.offline_add_urls([url], wp_path_id=cid)
+                    try:
+                        res = p115_client.offline_add_urls([url], pid=cid)
+                    except TypeError:
+                        res = p115_client.offline_add_urls([url], wp_path_id=cid)
                     is_success = True
                 
-                # 策略2：底层原生盲打 (针对 MoviePilot 重构的纯 OAuth API 架构)
                 if not is_success and hasattr(u115, '_request_api'):
                     try:
                         logger.info("【115离线】尝试使用底层 _request_api 盲打 App 接口...")
@@ -363,7 +362,6 @@ class movie115_organizer(_PluginBase):
                             method="POST",
                             data={"url": url, "wp_path_id": str(cid)}
                         )
-                        # API 返回字典且含有 state = True 表示成功
                         if isinstance(res, dict) and res.get("state"):
                             is_success = True
                         else:
@@ -371,20 +369,31 @@ class movie115_organizer(_PluginBase):
                     except Exception as e:
                         logger.debug(f"盲打接口调用抛错: {e}")
                 
-                # 策略3：传统的反射寻找代理对象
                 if not is_success:
                     _c = getattr(u115, "client", getattr(u115, "_client", getattr(u115, "pan", None)))
                     if hasattr(_c, 'offline_add_urls'):
-                        res = _c.offline_add_urls([url], wp_path_id=cid)
+                        try:
+                            res = _c.offline_add_urls([url], pid=cid)
+                        except TypeError:
+                            res = _c.offline_add_urls([url], wp_path_id=cid)
                         is_success = True
                     elif hasattr(u115, 'add_offline_task'):
-                        res = u115.add_offline_task(url, folder_id=cid)
+                        try:
+                            res = u115.add_offline_task(url, folder_id=cid)
+                        except TypeError:
+                            res = u115.add_offline_task(url, pid=cid)
+                        is_success = True
+                    elif hasattr(_c, 'offline_add_task'):
+                        res = _c.offline_add_task([url], pid=cid)
+                        is_success = True
+                    elif hasattr(_c, 'offline') and hasattr(_c.offline, 'add_url'):
+                        res = _c.offline.add_url(url, cid=cid)
                         is_success = True
                     else:
                         raise NotImplementedError("没有任何可用的底层离线下载通道。请在插件设置中填入 [115 独立 Cookie] 启用逃生舱功能。")
 
                 if is_success:
-                    logger.info(f"【115离线】添加任务成功: {url[:40]}... 返回: {res}")
+                    logger.info(f"【115离线】添加任务成功 (目标目录ID: {cid})，返回: {res}")
                     success_count += 1
             except Exception as e:
                 logger.error(f"【115离线】添加任务失败 {url[:40]}: {e}", exc_info=True)
@@ -431,8 +440,10 @@ class movie115_organizer(_PluginBase):
         try:
             paths = [p.strip() for p in self._monitor_paths.splitlines() if p.strip()]
             if not paths:
+                logger.info("【115整理】监控目录未配置，已退出整理任务。")
                 return
             if not self._target_path.strip():
+                logger.info("【115整理】目标移动路径未配置，已退出整理任务。")
                 return
 
             storage = StorageChain()
@@ -440,13 +451,18 @@ class movie115_organizer(_PluginBase):
             total_strm = 0
 
             for monitor_path in paths:
+                logger.info(f"【115整理】======================================")
                 logger.info(f"【115整理】开始扫描 115 目录: {monitor_path}")
                 parent_item = self._get_fileitem(storage, monitor_path)
+                
                 if not parent_item:
+                    logger.warning(f"【115整理】跳过目录 {monitor_path}：底层 API 无法在该层级获取到对应网盘节点。")
                     continue
 
                 children = storage.list_files(parent_item) or []
                 subfolders = [c for c in children if c.type == "dir"]
+                
+                logger.info(f"【115整理】[{monitor_path}] 共发现 {len(subfolders)} 个子文件夹需检查。")
 
                 for folder in subfolders:
                     moved, strm_count = self._process_folder(storage, folder)
@@ -469,24 +485,32 @@ class movie115_organizer(_PluginBase):
     def _process_folder(self, storage: StorageChain, folder: FileItem) -> Tuple[bool, int]:
         fname = folder.name
         threshold_bytes = self._size_threshold_mb * 1024 * 1024
+        
+        logger.info(f"【115整理】>>> 开始处理子文件夹: {fname}")
 
         files = storage.list_files(folder) or []
         all_files = [f for f in files if f.type == "file"]
+        
         if not all_files:
+            logger.info(f"【115整理】>>> 文件夹 [{fname}] 为空(可能是下载中)，跳过处理。")
             return False, 0
 
         small = [f for f in all_files if (f.size or 0) < threshold_bytes]
+        logger.info(f"【115整理】>>> 文件夹 [{fname}] 找到 {len(all_files)} 个文件，其中 {len(small)} 个小于阈值。")
+        
         for sf in small:
             try:
                 storage.delete_file(sf)
-            except Exception:
-                pass
+                logger.debug(f"【115整理】已删除小文件: {sf.name}")
+            except Exception as e:
+                logger.warning(f"【115整理】删除小文件 {sf.name} 失败: {e}")
 
         files_after = storage.list_files(folder) or []
         remaining = [f for f in files_after if f.type == "file"]
         still_small = [f for f in remaining if (f.size or 0) < threshold_bytes]
         
         if not remaining or still_small:
+            logger.info(f"【115整理】>>> 文件夹 [{fname}] 清理后暂不符合移动条件，跳过移动。")
             return False, 0
 
         strm_targets: List[Tuple[str, str]] = []
@@ -499,15 +523,22 @@ class movie115_organizer(_PluginBase):
                 try:
                     ok = storage.rename_file(bf, new_fname)
                     strm_targets.append((new_fname if ok else bf.name, pickcode))
-                except Exception:
+                    logger.info(f"【115整理】去@重命名成功: {bf.name} -> {new_fname}")
+                except Exception as e:
+                    logger.warning(f"【115整理】重命名失败 {bf.name}: {e}")
                     strm_targets.append((bf.name, pickcode))
             else:
                 strm_targets.append((bf.name, pickcode))
 
         target_path = self._target_path.rstrip("/")
+        logger.info(f"【115整理】开始移动整个文件夹 [{fname}] 到 -> {target_path}")
         ok = self._do_move(folder, target_path)
+        
         if not ok:
+            logger.error(f"【115整理】文件夹 [{fname}] 移动失败。")
             return False, 0
+            
+        logger.info(f"【115整理】文件夹 [{fname}] 移动成功！")
 
         strm_count = 0
         if self._strm_enabled and self._strm_local_path.strip():
@@ -561,18 +592,30 @@ class movie115_organizer(_PluginBase):
         try:
             parts = [p for p in path.strip("/").split("/") if p]
             if not parts: return None
+            
+            logger.info(f"【115整理】开始逐层解析云端路径: /{'/'.join(parts)}")
             root_item = FileItem(storage="u115", fileid="0", path="/", type="dir", name="")
             current_items = storage.list_files(root_item) or []
-            if not current_items: return None
+            
+            if not current_items:
+                logger.error("【115整理】解析失败：无法获取115根目录数据。")
+                return None
+                
             current_item = None
             for i, part in enumerate(parts):
                 matched = next((item for item in current_items if item.name == part), None)
-                if not matched: return None
+                if not matched:
+                    avail_dirs = [item.name for item in current_items if item.type == 'dir'][:10]
+                    logger.warning(f"【115整理】路径断裂：在当前层级找不到名为 '{part}' 的文件夹。当前可用文件夹包含: {avail_dirs}...")
+                    return None
                 current_item = matched
                 if i < len(parts) - 1:
                     current_items = storage.list_files(current_item) or []
+                    
+            logger.info(f"【115整理】路径解析成功！获取到目标文件夹ID: {getattr(current_item, 'fileid', '未知')}")
             return current_item
-        except Exception:
+        except Exception as e:
+            logger.error(f"【115整理】路径解析异常: {e}", exc_info=True)
             return None
 
     @staticmethod
@@ -632,13 +675,13 @@ class movie115_organizer(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "size_threshold_mb", "label": "垃圾文件阈值 (MB)", "type": "number"}}]},
                     ]},
                     {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "monitor_paths", "label": "监控目录（每行一个115路径）", "placeholder": "/CloudNAS/temp/小姐姐", "rows": 3}}]},
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "monitor_paths", "label": "监控目录（每行一个115路径）", "placeholder": "格式如: /接收/temp/小姐姐", "rows": 3}}]},
                     ]},
                     {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "target_path", "label": "115 移动目标路径", "placeholder": "/CloudNAS/电影"}}]},
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "target_path", "label": "115 移动目标路径", "placeholder": "格式如: /影视/电影"}}]},
                     ]},
                     {"component": "VRow", "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "cloud_download_dir", "label": "115云下载目录 (离线下载默认路径)", "placeholder": "/CloudNAS/下载"}}]},
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "cloud_download_dir", "label": "115云下载目录 (离线下载默认路径)", "placeholder": "格式如: /云下载"}}]},
                     ]},
                     {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "u115_cookie", "label": "115 独立 Cookie (离线逃生舱)", "hint": "若你的系统架构阻断了自动提取，请在此手动填入115网页端 Cookie以强行接管离线功能"}}]},

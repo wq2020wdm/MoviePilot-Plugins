@@ -19,7 +19,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "1.6.5"
+    plugin_version = "1.7.0"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -32,6 +32,7 @@ class movie115_organizer(_PluginBase):
     _monitor_paths: str = ""
     _target_path: str = ""
     _cloud_download_dir: str = ""
+    _u115_cookie: str = ""  # 新增：独立离线逃生舱 Cookie
     _size_threshold_mb: int = 500
     _notify: bool = True
     _run_once: bool = False
@@ -47,6 +48,7 @@ class movie115_organizer(_PluginBase):
             self._monitor_paths     = config.get("monitor_paths", "")
             self._target_path       = config.get("target_path", "")
             self._cloud_download_dir= config.get("cloud_download_dir", "")
+            self._u115_cookie       = config.get("u115_cookie", "")
             try:
                 self._size_threshold_mb = int(config.get("size_threshold_mb", 500))
             except Exception:
@@ -174,6 +176,15 @@ class movie115_organizer(_PluginBase):
                                                     {"component": "span", "props": {"class": "text-caption"}, "text": self._cloud_download_dir or "未配置"}
                                                 ]
                                             },
+                                            {"component": "VDivider", "props": {"class": "my-2"}},
+                                            {
+                                                "component": "div",
+                                                "props": {"class": "mb-3"},
+                                                "content": [
+                                                    {"component": "div", "props": {"class": "text-subtitle-2 mb-1"}, "text": "🍪 115 独立 Cookie (逃生舱)"},
+                                                    {"component": "span", "props": {"class": "text-caption"}, "text": "已配置 (强制接管离线功能)" if self._u115_cookie else "未配置 (尝试自动捕获底仓)"}
+                                                ]
+                                            },
                                         ]
                                     }
                                 ]
@@ -261,7 +272,6 @@ class movie115_organizer(_PluginBase):
 
     def _parse_cd_args(self, text: str) -> Tuple[List[str], str]:
         text = re.sub(r'(?<!^)(https?://|ftp://|magnet:\?|ed2k://)', r' \1', str(text), flags=re.IGNORECASE)
-        
         parts = text.split()
         urls = []
         dir_parts = []
@@ -307,59 +317,75 @@ class movie115_organizer(_PluginBase):
             self.post_message(mtype=NotificationType.SiteMessage, title="115离线下载", text="获取 115 实例失败，无法发起离线。")
             return
 
+        # ---- 核心提取逻辑：获取可用的 Cookie ----
+        cookie = self._u115_cookie.strip()
+        if not cookie and hasattr(u115, 'get_config'):
+            try:
+                conf = u115.get_config()
+                if isinstance(conf, dict):
+                    cookie = conf.get("cookie", "") or conf.get("cookies", "")
+            except Exception:
+                pass
+        if not cookie:
+            cookie = os.getenv("U115_COOKIE", "")
+
+        # ---- 初始化逃生舱客户端 ----
+        p115_client = None
+        if cookie:
+            try:
+                from p115client import P115Client
+                p115_client = P115Client(cookie)
+                logger.info("【115离线】检测到 Cookie，成功初始化 P115Client 独立逃生舱。")
+            except ImportError:
+                logger.warning("【115离线】找到 Cookie 但系统中未安装 p115client 依赖库。")
+            except Exception as e:
+                logger.error(f"【115离线】P115Client 初始化报错: {e}")
+
         success_count = 0
         fail_count = 0
 
         for url in urls:
             try:
-                client = None
-                
-                # 策略一：深度扫描现有实例，寻找带 offline 或 add_url 等特征的属性/方法
-                scan_targets = [u115] + [getattr(u115, a) for a in dir(u115) if not a.startswith('__')]
-                for target in scan_targets:
-                    try:
-                        if any(hasattr(target, m) for m in ['offline_add_urls', 'offline_add_task', 'offline_add_url', 'offline', 'add_offline_task']):
-                            client = target
-                            logger.info(f"【115离线】通过反射扫描找到底层API代理: {type(target).__name__}")
-                            break
-                    except Exception:
-                        pass
-                
-                # 策略二：原生直接接管。读取系统配置并独立实例化 p115client
-                if not client:
-                    try:
-                        from app.core.config import settings
-                        u115_cookie = getattr(settings, 'U115_COOKIE', None)
-                        if u115_cookie:
-                            from p115client import P115Client
-                            client = P115Client(u115_cookie)
-                            logger.info("【115离线】利用系统 U115_COOKIE 独立初始化 P115Client 成功!")
-                    except Exception as e:
-                        logger.debug(f"【115离线】独立初始化 P115Client 尝试失败: {e}")
-                
-                if not client:
-                    available_attrs = [a for a in dir(u115) if not a.startswith('__')] if u115 else []
-                    raise NotImplementedError(f"无法捕获底层 115 client 实例，且配置提取失败。当前 u115 暴露的属性: {available_attrs}")
-                
                 res = None
-                # 执行离线调用
-                if hasattr(client, 'add_offline_task'):
-                    res = client.add_offline_task(url, folder_id=cid)
-                elif hasattr(client, 'offline_add_urls'):
-                    res = client.offline_add_urls([url], wp_path_id=cid)
-                elif hasattr(client, 'offline_add_task'):
-                    res = client.offline_add_task([url], wp_path_id=cid)
-                elif hasattr(client, 'offline_add_url'):
-                    res = client.offline_add_url(url, wp_path_id=cid)
-                elif hasattr(client, 'offline') and hasattr(client.offline, 'add_url'):
-                    res = client.offline.add_url(url, cid=cid)
-                elif hasattr(client, 'offline') and hasattr(client.offline, 'add_urls'):
-                    res = client.offline.add_urls([url], cid=cid)
-                else:
-                    raise NotImplementedError("获取到了 client，但未找到对应的离线下载方法签名。")
+                is_success = False
                 
-                logger.info(f"【115离线】添加任务成功: {url[:40]}... 返回: {res}")
-                success_count += 1
+                # 策略1：使用独立的 p115client 逃生舱 (最高优先级)
+                if p115_client:
+                    res = p115_client.offline_add_urls([url], wp_path_id=cid)
+                    is_success = True
+                
+                # 策略2：底层原生盲打 (针对 MoviePilot 重构的纯 OAuth API 架构)
+                if not is_success and hasattr(u115, '_request_api'):
+                    try:
+                        logger.info("【115离线】尝试使用底层 _request_api 盲打 App 接口...")
+                        res = u115._request_api(
+                            url="https://proapi.115.com/app/lixian/add_task_url",
+                            method="POST",
+                            data={"url": url, "wp_path_id": str(cid)}
+                        )
+                        # API 返回字典且含有 state = True 表示成功
+                        if isinstance(res, dict) and res.get("state"):
+                            is_success = True
+                        else:
+                            logger.debug(f"盲打接口返回异常/失败状态: {res}")
+                    except Exception as e:
+                        logger.debug(f"盲打接口调用抛错: {e}")
+                
+                # 策略3：传统的反射寻找代理对象
+                if not is_success:
+                    _c = getattr(u115, "client", getattr(u115, "_client", getattr(u115, "pan", None)))
+                    if hasattr(_c, 'offline_add_urls'):
+                        res = _c.offline_add_urls([url], wp_path_id=cid)
+                        is_success = True
+                    elif hasattr(u115, 'add_offline_task'):
+                        res = u115.add_offline_task(url, folder_id=cid)
+                        is_success = True
+                    else:
+                        raise NotImplementedError("没有任何可用的底层离线下载通道。请在插件设置中填入 [115 独立 Cookie] 启用逃生舱功能。")
+
+                if is_success:
+                    logger.info(f"【115离线】添加任务成功: {url[:40]}... 返回: {res}")
+                    success_count += 1
             except Exception as e:
                 logger.error(f"【115离线】添加任务失败 {url[:40]}: {e}", exc_info=True)
                 fail_count += 1
@@ -564,6 +590,7 @@ class movie115_organizer(_PluginBase):
             "monitor_paths": self._monitor_paths,
             "target_path": self._target_path,
             "cloud_download_dir": self._cloud_download_dir,
+            "u115_cookie": self._u115_cookie,
             "size_threshold_mb": self._size_threshold_mb,
             "notify": self._notify,
             "strm_enabled": self._strm_enabled,
@@ -614,6 +641,9 @@ class movie115_organizer(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "cloud_download_dir", "label": "115云下载目录 (离线下载默认路径)", "placeholder": "/CloudNAS/下载"}}]},
                     ]},
                     {"component": "VRow", "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "u115_cookie", "label": "115 独立 Cookie (离线逃生舱)", "hint": "若你的系统架构阻断了自动提取，请在此手动填入115网页端 Cookie以强行接管离线功能"}}]},
+                    ]},
+                    {"component": "VRow", "content": [
                         {"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "strm_local_path", "label": "STRM 本地根目录（需开启生成STRM）", "placeholder": "/media/strm/电影"}}]},
                     ]},
                     {"component": "VRow", "content": [
@@ -630,6 +660,7 @@ class movie115_organizer(_PluginBase):
             "monitor_paths": "",
             "target_path": "",
             "cloud_download_dir": "",
+            "u115_cookie": "",
             "size_threshold_mb": 500,
             "notify": True,
             "run_once": False,

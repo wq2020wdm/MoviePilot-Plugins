@@ -17,9 +17,9 @@ from app.schemas.types import EventType
 class movie115_organizer(_PluginBase):
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
-    plugin_desc = "监控115网盘目录，自动删除小文件、去@重命名、移动到目标路径生成STRM，支持离线下载。"
+    plugin_desc = "监控115网盘，正则提取纯净番号(智能保留-C/-UC)，自动重命名、移动并生成STRM，支持离线下载。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.3.0"
+    plugin_version = "2.5.0"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -251,41 +251,29 @@ class movie115_organizer(_PluginBase):
                 is_success = False
                 res = None
 
-                # ================================================================
-                # 破局点：像素级复刻参考代码的 Payload 构造
-                # 把链接写成 url[0]，并把 wp_path_id 直接封进同一个字典里
-                # ================================================================
                 payload = {
                     "url[0]": url.strip(),
                     "wp_path_id": cid_int
                 }
 
-                logger.info(f"【115离线】完美字典构造完成: {payload}")
-
-                # 1. 尝试 Cookie 独立逃生舱
                 if p115_client:
                     try:
-                        logger.info("【115离线】向 P115Client 发送 payload...")
                         res = p115_client.offline_add_urls(payload)
                         if self._is_offline_success(res):
                             is_success = True
                     except Exception as e:
                         logger.debug(f"P115Client Payload 调用失败: {e}")
                 
-                # 2. 尝试 MP 底层客户端
                 if not is_success and u115:
                     if hasattr(u115, 'client') and hasattr(u115.client, 'offline_add_urls'):
                         try:
-                            logger.info("【115离线】向 MP底层客户端 发送 payload...")
                             res = u115.client.offline_add_urls(payload)
                             if self._is_offline_success(res):
                                 is_success = True
                         except Exception as e:
                             logger.debug(f"u115.client Payload 调用失败: {e}")
 
-                # 3. 终极盲打（这其实就是 P115Client 底层的真实请求姿势）
                 if not is_success and hasattr(u115, '_request_api'):
-                    logger.info("【115离线】启用 _request_api 强制盲打 Payload...")
                     try:
                         res = u115._request_api(
                             url="https://proapi.115.com/app/lixian/add_task_url",
@@ -344,6 +332,69 @@ class movie115_organizer(_PluginBase):
         except Exception as e:
             logger.error(f"【115整理】获取 U115Pan 失败: {e}", exc_info=True)
             return None
+
+    # =========================================================================
+    # 🔥 核心增强：强大的正则表达式番号提取引擎 (V2.5 智能保留后缀版)
+    # =========================================================================
+    @staticmethod
+    def _extract_bango(filename: str) -> str:
+        """
+        利用强大的正则表达式，从杂乱的文件名中提取纯净的番号，并智能保留高价值标签。
+        1. 移除广告、无用分辨率标签
+        2. 将 _ 或 空格 标准化为 -
+        3. 保留 -C (中文字幕) 和 -UC (无码破解)
+        """
+        # 1. 预处理：记录并提取重要后缀（忽略大小写，兼容 _C 和 -C）
+        has_c = bool(re.search(r'[-_]C\b', filename, re.IGNORECASE))
+        has_uc = bool(re.search(r'[-_]UC\b|破解版|无码', filename, re.IGNORECASE))
+
+        # 2. 暴力切除：移除所有常见广告前缀 (如 [hhd800.com], 4455@, @18p.tv 等)
+        # 注意这里把带 @ 的前缀也干掉了，例如 4455@ABP-123 -> ABP-123
+        clean_name = re.sub(r'\[.*?\]|.*?@|@.*?(\s|-|_)', '', filename)
+        
+        # 3. 剔除所有无用分辨率和标签后缀 (包括提取出的 C 和 UC 也先砍掉，后面再补)
+        clean_name = re.sub(r'(-C|_C|-FHD|-HD|-1080p|_1080p|_4K|-uncensored|[-_]UC|破解版|无码).*', '', clean_name, flags=re.IGNORECASE)
+
+        # 4. 标准化分隔符：把下划线 _ 和空格 替换为连字符 - （处理 abp_145 -> abp-145）
+        clean_name = re.sub(r'[_ ]', '-', clean_name)
+
+        bango = ""
+        # 5. 提取番号的主力正则矩阵
+        patterns = [
+            # 标准格式：字母(2-6个)-数字(2-5个) (例如: ABP-123, MIDE-456, HND-789)
+            r'([a-zA-Z]{2,6}-\d{2,5})',
+            # 数字开头格式：(例如: 1Pondo-123, 10MUS-456)
+            r'(\d{1,2}[a-zA-Z]{2,5}-\d{2,5})',
+            # FC2格式：FC2-PPV-1234567 或 FC2-1234567
+            r'(FC2-PPV-\d{5,8}|FC2-\d{5,8})',
+            # 无中划线纯连写格式：(例如: ABP123)
+            r'([a-zA-Z]{2,6})(\d{2,5})',
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, clean_name, re.IGNORECASE)
+            if match:
+                # 提取匹配到的文本，并转换为大写
+                bango = match.group(1).upper()
+                
+                # 如果匹配到的是无中划线的 (如 ABP123)，手动给它补上中划线
+                if '-' not in bango and re.match(r'^[A-Z]+\d+$', bango):
+                    letter_part = re.search(r'^[A-Z]+', bango).group()
+                    num_part = re.search(r'\d+$', bango).group()
+                    bango = f"{letter_part}-{num_part}"
+                break
+                
+        # 6. 如果所有正则都没匹配上，退化为原文件名（但已经去掉了前面的广告词）
+        if not bango:
+            bango = Path(clean_name).stem.upper()
+
+        # 7. 组装高价值后缀！按规范顺序补齐
+        if has_c:
+            bango += "-C"
+        if has_uc:
+            bango += "-UC"
+
+        return bango
 
     def execute(self, **kwargs):
         if not self._lock.acquire(blocking=False):
@@ -417,32 +468,51 @@ class movie115_organizer(_PluginBase):
 
         strm_targets: List[Tuple[str, str]] = []
         need_pickcode = "{pick_code}" in self._strm_template
+        
+        folder_needs_rename = False
+        new_folder_name = fname
+        
         for bf in [f for f in remaining if (f.size or 0) >= threshold_bytes]:
             pickcode = (getattr(bf, "pickcode", None) or "") if need_pickcode else ""
-            if "@" in bf.name:
-                new_fname = bf.name.split("@")[-1]
+            
+            pure_bango = self._extract_bango(bf.name)
+            ext = Path(bf.name).suffix
+            new_file_name = f"{pure_bango}{ext}"
+            
+            if bf.name != new_file_name:
                 try:
-                    ok = storage.rename_file(bf, new_fname)
-                    strm_targets.append((new_fname if ok else bf.name, pickcode))
-                    logger.info(f"【115整理】去@重命名成功: {bf.name} -> {new_fname}")
+                    ok = storage.rename_file(bf, new_file_name)
+                    strm_targets.append((new_file_name if ok else bf.name, pickcode))
+                    logger.info(f"【115整理】正则表达式洗白重命名成功: {bf.name} -> {new_file_name}")
+                    
+                    folder_needs_rename = True
+                    new_folder_name = pure_bango
                 except Exception as e:
-                    logger.warning(f"【115整理】重命名失败 {bf.name}: {e}")
+                    logger.warning(f"【115整理】重命名文件失败 {bf.name}: {e}")
                     strm_targets.append((bf.name, pickcode))
             else:
                 strm_targets.append((bf.name, pickcode))
 
+        if folder_needs_rename and fname != new_folder_name:
+            try:
+                storage.rename_file(folder, new_folder_name)
+                logger.info(f"【115整理】父文件夹同步重命名成功: {fname} -> {new_folder_name}")
+                folder.name = new_folder_name
+            except Exception as e:
+                logger.warning(f"【115整理】重命名父文件夹失败 {fname}: {e}")
+
         target_path = self._target_path.rstrip("/")
-        logger.info(f"【115整理】开始移动整个文件夹 [{fname}] 到 -> {target_path}")
+        logger.info(f"【115整理】开始移动整个文件夹 [{folder.name}] 到 -> {target_path}")
         ok = self._do_move(folder, target_path)
         if not ok:
-            logger.error(f"【115整理】文件夹 [{fname}] 移动失败。")
+            logger.error(f"【115整理】文件夹 [{folder.name}] 移动失败。")
             return False, 0
-        logger.info(f"【115整理】文件夹 [{fname}] 移动成功！")
+        logger.info(f"【115整理】文件夹 [{folder.name}] 移动成功！")
 
         strm_count = 0
         if self._strm_enabled and self._strm_local_path.strip():
             for file_name, pickcode in strm_targets:
-                if self._generate_strm(fname, file_name, pickcode, target_path):
+                if self._generate_strm(folder.name, file_name, pickcode, target_path):
                     strm_count += 1
         return True, strm_count
 

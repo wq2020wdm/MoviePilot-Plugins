@@ -17,9 +17,9 @@ from app.schemas.types import EventType
 class movie115_organizer(_PluginBase):
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
-    plugin_desc = "监控115网盘，正则提取纯净番号(智能保留-C/-UC)，自动重命名、移动并生成STRM，支持离线下载。"
+    plugin_desc = "深度清理嵌套垃圾，提取纯净番号(保留-C/-UC)，自动重命名移动生成STRM，支持离线。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.5.0"
+    plugin_version = "2.6.0"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -333,68 +333,85 @@ class movie115_organizer(_PluginBase):
             logger.error(f"【115整理】获取 U115Pan 失败: {e}", exc_info=True)
             return None
 
-    # =========================================================================
-    # 🔥 核心增强：强大的正则表达式番号提取引擎 (V2.5 智能保留后缀版)
-    # =========================================================================
     @staticmethod
     def _extract_bango(filename: str) -> str:
-        """
-        利用强大的正则表达式，从杂乱的文件名中提取纯净的番号，并智能保留高价值标签。
-        1. 移除广告、无用分辨率标签
-        2. 将 _ 或 空格 标准化为 -
-        3. 保留 -C (中文字幕) 和 -UC (无码破解)
-        """
-        # 1. 预处理：记录并提取重要后缀（忽略大小写，兼容 _C 和 -C）
         has_c = bool(re.search(r'[-_]C\b', filename, re.IGNORECASE))
         has_uc = bool(re.search(r'[-_]UC\b|破解版|无码', filename, re.IGNORECASE))
 
-        # 2. 暴力切除：移除所有常见广告前缀 (如 [hhd800.com], 4455@, @18p.tv 等)
-        # 注意这里把带 @ 的前缀也干掉了，例如 4455@ABP-123 -> ABP-123
         clean_name = re.sub(r'\[.*?\]|.*?@|@.*?(\s|-|_)', '', filename)
-        
-        # 3. 剔除所有无用分辨率和标签后缀 (包括提取出的 C 和 UC 也先砍掉，后面再补)
         clean_name = re.sub(r'(-C|_C|-FHD|-HD|-1080p|_1080p|_4K|-uncensored|[-_]UC|破解版|无码).*', '', clean_name, flags=re.IGNORECASE)
-
-        # 4. 标准化分隔符：把下划线 _ 和空格 替换为连字符 - （处理 abp_145 -> abp-145）
         clean_name = re.sub(r'[_ ]', '-', clean_name)
 
         bango = ""
-        # 5. 提取番号的主力正则矩阵
         patterns = [
-            # 标准格式：字母(2-6个)-数字(2-5个) (例如: ABP-123, MIDE-456, HND-789)
             r'([a-zA-Z]{2,6}-\d{2,5})',
-            # 数字开头格式：(例如: 1Pondo-123, 10MUS-456)
             r'(\d{1,2}[a-zA-Z]{2,5}-\d{2,5})',
-            # FC2格式：FC2-PPV-1234567 或 FC2-1234567
             r'(FC2-PPV-\d{5,8}|FC2-\d{5,8})',
-            # 无中划线纯连写格式：(例如: ABP123)
             r'([a-zA-Z]{2,6})(\d{2,5})',
         ]
 
         for pattern in patterns:
             match = re.search(pattern, clean_name, re.IGNORECASE)
             if match:
-                # 提取匹配到的文本，并转换为大写
                 bango = match.group(1).upper()
-                
-                # 如果匹配到的是无中划线的 (如 ABP123)，手动给它补上中划线
                 if '-' not in bango and re.match(r'^[A-Z]+\d+$', bango):
                     letter_part = re.search(r'^[A-Z]+', bango).group()
                     num_part = re.search(r'\d+$', bango).group()
                     bango = f"{letter_part}-{num_part}"
                 break
                 
-        # 6. 如果所有正则都没匹配上，退化为原文件名（但已经去掉了前面的广告词）
         if not bango:
             bango = Path(clean_name).stem.upper()
 
-        # 7. 组装高价值后缀！按规范顺序补齐
         if has_c:
             bango += "-C"
         if has_uc:
             bango += "-UC"
 
         return bango
+
+    # =========================================================================
+    # 🔥 核心增强：深度递归清理引擎 (穿透子文件夹)
+    # =========================================================================
+    def _deep_clean_folder(self, storage: StorageChain, folder: FileItem, threshold_bytes: int) -> bool:
+        """
+        递归清理文件夹内的垃圾文件和空子文件夹。
+        返回 True 表示该文件夹（或其内部）还有有效文件保留。
+        返回 False 表示该文件夹被彻底清空了（是个空壳）。
+        """
+        files_and_dirs = storage.list_files(folder) or []
+        
+        has_valid_content = False
+        
+        for item in files_and_dirs:
+            if item.type == "dir":
+                # 如果遇到子文件夹，递归钻进去清理
+                is_subfolder_valid = self._deep_clean_folder(storage, item, threshold_bytes)
+                if is_subfolder_valid:
+                    has_valid_content = True
+                else:
+                    # 如果子文件夹被清理后变成了空壳，顺手把它删了
+                    try:
+                        storage.delete_file(item)
+                        logger.debug(f"【115整理】已删除空壳/全垃圾子文件夹: {item.name}")
+                    except Exception as e:
+                        logger.warning(f"【115整理】删除空壳子文件夹 {item.name} 失败: {e}")
+                        has_valid_content = True # 删除失败则认为它还有残留
+                        
+            elif item.type == "file":
+                # 如果遇到文件，检查大小
+                if (item.size or 0) < threshold_bytes:
+                    try:
+                        storage.delete_file(item)
+                        logger.debug(f"【115整理】已深层删除垃圾文件: {folder.name}/{item.name}")
+                    except Exception as e:
+                        logger.warning(f"【115整理】深层删除垃圾文件 {item.name} 失败: {e}")
+                        has_valid_content = True # 删除失败则认为它存在
+                else:
+                    # 发现大于阈值的有效文件！
+                    has_valid_content = True
+
+        return has_valid_content
 
     def execute(self, **kwargs):
         if not self._lock.acquire(blocking=False):
@@ -423,7 +440,7 @@ class movie115_organizer(_PluginBase):
 
                 children = storage.list_files(parent_item) or []
                 subfolders = [c for c in children if c.type == "dir"]
-                logger.info(f"【115整理】[{monitor_path}] 共发现 {len(subfolders)} 个子文件夹需检查。")
+                logger.info(f"【115整理】[{monitor_path}] 共发现 {len(subfolders)} 个番号文件夹需检查。")
 
                 for folder in subfolders:
                     moved, strm_count = self._process_folder(storage, folder)
@@ -442,28 +459,22 @@ class movie115_organizer(_PluginBase):
     def _process_folder(self, storage: StorageChain, folder: FileItem) -> Tuple[bool, int]:
         fname = folder.name
         threshold_bytes = self._size_threshold_mb * 1024 * 1024
-        logger.info(f"【115整理】>>> 开始处理子文件夹: {fname}")
+        logger.info(f"【115整理】>>> 开始处理番号文件夹: {fname}")
 
-        files = storage.list_files(folder) or []
-        all_files = [f for f in files if f.type == "file"]
-        if not all_files:
-            logger.info(f"【115整理】>>> 文件夹 [{fname}] 为空(可能是下载中)，跳过处理。")
+        # 🔥 第一步：执行无死角的深度清理！
+        has_valid_content = self._deep_clean_folder(storage, folder, threshold_bytes)
+        
+        if not has_valid_content:
+            logger.info(f"【115整理】>>> 文件夹 [{fname}] 清理后为空(已无符合条件的文件)，跳过后续移动。")
             return False, 0
 
-        small = [f for f in all_files if (f.size or 0) < threshold_bytes]
-        logger.info(f"【115整理】>>> 文件夹 [{fname}] 找到 {len(all_files)} 个文件，其中 {len(small)} 个小于阈值。")
-        for sf in small:
-            try:
-                storage.delete_file(sf)
-                logger.debug(f"【115整理】已删除小文件: {sf.name}")
-            except Exception as e:
-                logger.warning(f"【115整理】删除小文件 {sf.name} 失败: {e}")
-
+        # 第二步：清理完后，重新获取该文件夹下剩余的直接子文件，准备洗白和移动
+        # (注意：STRM只针对主文件夹下的大视频生成，嵌套太深的大视频通常是拆分片，不做特殊展平处理以防错乱)
         files_after = storage.list_files(folder) or []
-        remaining = [f for f in files_after if f.type == "file"]
-        still_small = [f for f in remaining if (f.size or 0) < threshold_bytes]
-        if not remaining or still_small:
-            logger.info(f"【115整理】>>> 文件夹 [{fname}] 清理后暂不符合移动条件，跳过移动。")
+        remaining_files = [f for f in files_after if f.type == "file" and (f.size or 0) >= threshold_bytes]
+        
+        if not remaining_files:
+            logger.info(f"【115整理】>>> 文件夹 [{fname}] 主目录下无有效大视频，跳过移动。")
             return False, 0
 
         strm_targets: List[Tuple[str, str]] = []
@@ -472,7 +483,7 @@ class movie115_organizer(_PluginBase):
         folder_needs_rename = False
         new_folder_name = fname
         
-        for bf in [f for f in remaining if (f.size or 0) >= threshold_bytes]:
+        for bf in remaining_files:
             pickcode = (getattr(bf, "pickcode", None) or "") if need_pickcode else ""
             
             pure_bango = self._extract_bango(bf.name)
@@ -483,7 +494,7 @@ class movie115_organizer(_PluginBase):
                 try:
                     ok = storage.rename_file(bf, new_file_name)
                     strm_targets.append((new_file_name if ok else bf.name, pickcode))
-                    logger.info(f"【115整理】正则表达式洗白重命名成功: {bf.name} -> {new_file_name}")
+                    logger.info(f"【115整理】洗白重命名成功: {bf.name} -> {new_file_name}")
                     
                     folder_needs_rename = True
                     new_folder_name = pure_bango

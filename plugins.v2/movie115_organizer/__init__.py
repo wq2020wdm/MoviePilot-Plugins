@@ -18,9 +18,9 @@ from app.schemas.types import EventType
 class movie115_organizer(_PluginBase):
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
-    plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList/AList刷新缓存与mdcx刮削。"
+    plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList强制刷新与mdcx刮削。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.7.0"
+    plugin_version = "2.7.1"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -42,7 +42,7 @@ class movie115_organizer(_PluginBase):
     _strm_template: str = "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}"
     _mdcx_container: str = ""
     
-    # 新增 OpenList/AList 联动配置
+    # OpenList/AList 联动配置
     _openlist_url: str = ""
     _openlist_token: str = ""
     _openlist_mount_path: str = ""
@@ -411,7 +411,7 @@ class movie115_organizer(_PluginBase):
         return has_valid_content
 
     # =========================================================================
-    # 🔥 核心增强：自动通知 OpenList / AList 刷新缓存
+    # 🔥 核心增强：强制要求 OpenList / AList 去 115 拉取最新文件数据
     # =========================================================================
     def _refresh_openlist_cache(self, cloud_target_path: str):
         if not self._openlist_url.strip() or not self._openlist_token.strip() or not self._openlist_mount_path.strip():
@@ -422,7 +422,9 @@ class movie115_organizer(_PluginBase):
         
         # 组合绝对路径，例如: /115网盘/影视/电影
         full_openlist_path = f"{mount_name}/{cloud_target_path.strip('/')}"
-        api_endpoint = f"{openlist_url}/api/fs/clear_cache"
+        
+        # 改为使用 list 接口，配合 refresh: True 强制穿透缓存同步上游数据
+        api_endpoint = f"{openlist_url}/api/fs/list"
         
         headers = {
             "Authorization": self._openlist_token.strip(),
@@ -430,15 +432,19 @@ class movie115_organizer(_PluginBase):
         }
         payload = {
             "path": full_openlist_path,
-            "password": ""
+            "password": "",
+            "page": 1,
+            "per_page": 0,
+            "refresh": True  # 核心参数：告诉 AList 去 115 重新拉取
         }
         
         try:
-            response = requests.post(api_endpoint, headers=headers, json=payload, timeout=10)
+            # 增加超时时间以等待 AList 向上游拉取完毕
+            response = requests.post(api_endpoint, headers=headers, json=payload, timeout=15)
             if response.status_code == 200:
-                logger.info(f"【OpenList联动】成功刷新目录缓存: {full_openlist_path}")
+                logger.info(f"【OpenList联动】成功强制拉取最新数据: {full_openlist_path}")
             else:
-                logger.warning(f"【OpenList联动】刷新缓存失败: {response.status_code} - {response.text}")
+                logger.warning(f"【OpenList联动】强制拉取最新数据失败: {response.status_code} - {response.text}")
         except Exception as e:
             logger.error(f"【OpenList联动】请求 API 发生异常: {e}")
 
@@ -481,7 +487,7 @@ class movie115_organizer(_PluginBase):
                 self.post_message(mtype=NotificationType.SiteMessage, title="115目录洗白整理完成",
                                   text=f"本次共整理并移动了 {total_moved} 个文件夹，生成 STRM {total_strm} 个。")
             
-            # 🔥 当发生实际移动时，自动调用刷新缓存与刮削
+            # 🔥 确实发生了文件移动，触发强制同步
             if total_moved > 0:
                 self._refresh_openlist_cache(self._target_path)
             

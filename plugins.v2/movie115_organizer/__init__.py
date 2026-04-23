@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import requests
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,9 +18,9 @@ from app.schemas.types import EventType
 class movie115_organizer(_PluginBase):
     plugin_id = "movie115_organizer"
     plugin_name = "115 目录洗白整理"
-    plugin_desc = "深度清理嵌套垃圾，提取纯净番号(保留-C/-UC)，自动重命名移动生成STRM，支持离线。"
+    plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList/AList刷新缓存与mdcx刮削。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.6.0"
+    plugin_version = "2.7.0"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -40,6 +41,11 @@ class movie115_organizer(_PluginBase):
     _strm_local_path: str = ""
     _strm_template: str = "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}"
     _mdcx_container: str = ""
+    
+    # 新增 OpenList/AList 联动配置
+    _openlist_url: str = ""
+    _openlist_token: str = ""
+    _openlist_mount_path: str = ""
 
     def init_plugin(self, config: dict = None):
         if config:
@@ -60,6 +66,9 @@ class movie115_organizer(_PluginBase):
             self._strm_template     = config.get("strm_template",
                 "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}")
             self._mdcx_container    = config.get("mdcx_container", "")
+            self._openlist_url      = config.get("openlist_url", "")
+            self._openlist_token    = config.get("openlist_token", "")
+            self._openlist_mount_path= config.get("openlist_mount_path", "")
 
         if self._run_once:
             self._run_once = False
@@ -370,48 +379,68 @@ class movie115_organizer(_PluginBase):
 
         return bango
 
-    # =========================================================================
-    # 🔥 核心增强：深度递归清理引擎 (穿透子文件夹)
-    # =========================================================================
     def _deep_clean_folder(self, storage: StorageChain, folder: FileItem, threshold_bytes: int) -> bool:
-        """
-        递归清理文件夹内的垃圾文件和空子文件夹。
-        返回 True 表示该文件夹（或其内部）还有有效文件保留。
-        返回 False 表示该文件夹被彻底清空了（是个空壳）。
-        """
+        """递归清理文件夹内的垃圾文件和空子文件夹"""
         files_and_dirs = storage.list_files(folder) or []
-        
         has_valid_content = False
         
         for item in files_and_dirs:
             if item.type == "dir":
-                # 如果遇到子文件夹，递归钻进去清理
                 is_subfolder_valid = self._deep_clean_folder(storage, item, threshold_bytes)
                 if is_subfolder_valid:
                     has_valid_content = True
                 else:
-                    # 如果子文件夹被清理后变成了空壳，顺手把它删了
                     try:
                         storage.delete_file(item)
-                        logger.debug(f"【115整理】已删除空壳/全垃圾子文件夹: {item.name}")
+                        logger.debug(f"【115整理】已删除空壳子文件夹: {item.name}")
                     except Exception as e:
                         logger.warning(f"【115整理】删除空壳子文件夹 {item.name} 失败: {e}")
-                        has_valid_content = True # 删除失败则认为它还有残留
+                        has_valid_content = True 
                         
             elif item.type == "file":
-                # 如果遇到文件，检查大小
                 if (item.size or 0) < threshold_bytes:
                     try:
                         storage.delete_file(item)
                         logger.debug(f"【115整理】已深层删除垃圾文件: {folder.name}/{item.name}")
                     except Exception as e:
                         logger.warning(f"【115整理】深层删除垃圾文件 {item.name} 失败: {e}")
-                        has_valid_content = True # 删除失败则认为它存在
+                        has_valid_content = True
                 else:
-                    # 发现大于阈值的有效文件！
                     has_valid_content = True
 
         return has_valid_content
+
+    # =========================================================================
+    # 🔥 核心增强：自动通知 OpenList / AList 刷新缓存
+    # =========================================================================
+    def _refresh_openlist_cache(self, cloud_target_path: str):
+        if not self._openlist_url.strip() or not self._openlist_token.strip() or not self._openlist_mount_path.strip():
+            return
+        
+        openlist_url = self._openlist_url.rstrip('/')
+        mount_name = self._openlist_mount_path.rstrip('/')
+        
+        # 组合绝对路径，例如: /115网盘/影视/电影
+        full_openlist_path = f"{mount_name}/{cloud_target_path.strip('/')}"
+        api_endpoint = f"{openlist_url}/api/fs/clear_cache"
+        
+        headers = {
+            "Authorization": self._openlist_token.strip(),
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "path": full_openlist_path,
+            "password": ""
+        }
+        
+        try:
+            response = requests.post(api_endpoint, headers=headers, json=payload, timeout=10)
+            if response.status_code == 200:
+                logger.info(f"【OpenList联动】成功刷新目录缓存: {full_openlist_path}")
+            else:
+                logger.warning(f"【OpenList联动】刷新缓存失败: {response.status_code} - {response.text}")
+        except Exception as e:
+            logger.error(f"【OpenList联动】请求 API 发生异常: {e}")
 
     def execute(self, **kwargs):
         if not self._lock.acquire(blocking=False):
@@ -451,6 +480,11 @@ class movie115_organizer(_PluginBase):
             if self._notify and total_moved > 0:
                 self.post_message(mtype=NotificationType.SiteMessage, title="115目录洗白整理完成",
                                   text=f"本次共整理并移动了 {total_moved} 个文件夹，生成 STRM {total_strm} 个。")
+            
+            # 🔥 当发生实际移动时，自动调用刷新缓存与刮削
+            if total_moved > 0:
+                self._refresh_openlist_cache(self._target_path)
+            
             if total_strm > 0 and self._mdcx_container.strip():
                 self._restart_mdcx(self._mdcx_container.strip())
         finally:
@@ -461,15 +495,12 @@ class movie115_organizer(_PluginBase):
         threshold_bytes = self._size_threshold_mb * 1024 * 1024
         logger.info(f"【115整理】>>> 开始处理番号文件夹: {fname}")
 
-        # 🔥 第一步：执行无死角的深度清理！
         has_valid_content = self._deep_clean_folder(storage, folder, threshold_bytes)
         
         if not has_valid_content:
-            logger.info(f"【115整理】>>> 文件夹 [{fname}] 清理后为空(已无符合条件的文件)，跳过后续移动。")
+            logger.info(f"【115整理】>>> 文件夹 [{fname}] 清理后为空，跳过后续移动。")
             return False, 0
 
-        # 第二步：清理完后，重新获取该文件夹下剩余的直接子文件，准备洗白和移动
-        # (注意：STRM只针对主文件夹下的大视频生成，嵌套太深的大视频通常是拆分片，不做特殊展平处理以防错乱)
         files_after = storage.list_files(folder) or []
         remaining_files = [f for f in files_after if f.type == "file" and (f.size or 0) >= threshold_bytes]
         
@@ -605,6 +636,8 @@ class movie115_organizer(_PluginBase):
             "size_threshold_mb": self._size_threshold_mb, "notify": self._notify,
             "strm_enabled": self._strm_enabled, "strm_local_path": self._strm_local_path,
             "strm_template": self._strm_template, "mdcx_container": self._mdcx_container,
+            "openlist_url": self._openlist_url, "openlist_token": self._openlist_token,
+            "openlist_mount_path": self._openlist_mount_path,
         }
 
     def get_api(self) -> List[dict]: return []
@@ -635,6 +668,14 @@ class movie115_organizer(_PluginBase):
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "u115_cookie", "label": "115 独立 Cookie (离线逃生舱)", "hint": "若你的系统架构阻断了自动提取，请在此手动填入115网页端 Cookie以强行接管离线功能"}}]}]},
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "strm_local_path", "label": "STRM 本地根目录（需开启生成STRM）", "placeholder": "/media/strm/电影"}}]}]},
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "strm_template", "label": "STRM 内容模板", "hint": "{cloud_file}=云端完整路径  {pick_code}=115 pickcode"}}]}]},
+                
+                # AList/OpenList 联动配置
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openlist_url", "label": "OpenList 地址 (选填)", "placeholder": "http://ip:5244", "hint": "整理后自动刷新缓存"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openlist_token", "label": "OpenList Token (选填)"}}]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VTextField", "props": {"model": "openlist_mount_path", "label": "115挂载节点名 (选填)", "placeholder": "/115网盘"}}]},
+                ]},
+                
                 {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextField", "props": {"model": "mdcx_container", "label": "mdcx 容器名", "placeholder": "mdcx", "hint": "生成STRM后将自动重启该容器触发刮削（留空则不重启）"}}]}]},
             ]}
         ], {
@@ -642,5 +683,5 @@ class movie115_organizer(_PluginBase):
             "cloud_download_dir": "", "u115_cookie": "", "size_threshold_mb": 500,
             "notify": True, "run_once": False, "strm_enabled": False, "strm_local_path": "",
             "strm_template": "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}",
-            "mdcx_container": "",
+            "mdcx_container": "", "openlist_url": "", "openlist_token": "", "openlist_mount_path": "",
         }

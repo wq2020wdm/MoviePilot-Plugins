@@ -20,7 +20,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList强制刷新与mdcx刮削。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.7.1"
+    plugin_version = "2.7.2"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -265,13 +265,24 @@ class movie115_organizer(_PluginBase):
                     "wp_path_id": cid_int
                 }
 
+                fail_reasons = []
+
                 if p115_client:
-                    try:
-                        res = p115_client.offline_add_urls(payload)
-                        if self._is_offline_success(res):
-                            is_success = True
-                    except Exception as e:
-                        logger.debug(f"P115Client Payload 调用失败: {e}")
+                    p115_calls = (
+                        ("P115Client 列表调用", lambda: p115_client.offline_add_urls([url.strip()], wp_path_id=cid_int)),
+                        ("P115Client Payload 调用", lambda: p115_client.offline_add_urls(payload)),
+                    )
+                    for call_name, call_func in p115_calls:
+                        try:
+                            res = call_func()
+                            if self._is_offline_success(res):
+                                is_success = True
+                                break
+                            fail_reasons.append(f"{call_name}返回失败: {self._brief_res(res)}")
+                        except TypeError as e:
+                            fail_reasons.append(f"{call_name}参数不兼容: {e}")
+                        except Exception as e:
+                            fail_reasons.append(f"{call_name}异常: {e}")
                 
                 if not is_success and u115:
                     if hasattr(u115, 'client') and hasattr(u115.client, 'offline_add_urls'):
@@ -279,8 +290,10 @@ class movie115_organizer(_PluginBase):
                             res = u115.client.offline_add_urls(payload)
                             if self._is_offline_success(res):
                                 is_success = True
+                            else:
+                                fail_reasons.append(f"u115.client Payload 返回失败: {self._brief_res(res)}")
                         except Exception as e:
-                            logger.debug(f"u115.client Payload 调用失败: {e}")
+                            fail_reasons.append(f"u115.client Payload 异常: {e}")
 
                 if not is_success and hasattr(u115, '_request_api'):
                     try:
@@ -291,11 +304,14 @@ class movie115_organizer(_PluginBase):
                         )
                         if self._is_offline_success(res):
                             is_success = True
+                        else:
+                            fail_reasons.append(f"proapi 旧接口返回失败: {self._brief_res(res)}")
                     except Exception as e:
-                        logger.debug(f"_request_api 盲打失败: {e}")
+                        fail_reasons.append(f"proapi 旧接口异常: {e}")
 
                 if not is_success:
-                    raise NotImplementedError("底层离线接口调用全部失效，请确认填入了正确的 115 独立 Cookie。")
+                    detail = "；".join(fail_reasons) or "未找到可用离线接口"
+                    raise NotImplementedError(f"底层离线接口调用全部失效：{detail}")
 
                 logger.info(f"【115离线】添加任务成功 (最终目录ID: {cid_int})，返回结果: {res}")
                 success_count += 1
@@ -329,6 +345,11 @@ class movie115_organizer(_PluginBase):
             if isinstance(data, dict) and data.get("state"):
                 return True
         return False
+
+    @staticmethod
+    def _brief_res(res) -> str:
+        text = str(res)
+        return text if len(text) <= 300 else f"{text[:300]}..."
 
     def _get_u115(self):
         if movie115_organizer._u115_inst is not None:

@@ -20,7 +20,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList强制刷新与mdcx刮削。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.7.2"
+    plugin_version = "2.7.3"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -268,10 +268,31 @@ class movie115_organizer(_PluginBase):
                 fail_reasons = []
 
                 if p115_client:
-                    p115_calls = (
-                        ("P115Client 列表调用", lambda: p115_client.offline_add_urls([url.strip()], wp_path_id=cid_int)),
-                        ("P115Client Payload 调用", lambda: p115_client.offline_add_urls(payload)),
-                    )
+                    p115_calls = []
+                    if hasattr(p115_client, "clouddownload_task_add_url"):
+                        p115_calls.append((
+                            "P115Client Web 单链接接口",
+                            lambda: p115_client.clouddownload_task_add_url({"url": url.strip(), "wp_path_id": cid_int})
+                        ))
+                    if hasattr(p115_client, "clouddownload_task_add_urls"):
+                        p115_calls.append((
+                            "P115Client Web 批量接口",
+                            lambda: p115_client.clouddownload_task_add_urls(payload)
+                        ))
+                    if hasattr(p115_client, "clouddownload_task_add_urls_open"):
+                        p115_calls.append((
+                            "P115Client OpenAPI 批量接口",
+                            lambda: p115_client.clouddownload_task_add_urls_open({"urls": url.strip(), "wp_path_id": cid_int})
+                        ))
+                    if hasattr(p115_client, "offline_add_urls"):
+                        p115_calls.append((
+                            "P115Client 旧版 offline_add_urls 接口",
+                            lambda: p115_client.offline_add_urls(payload)
+                        ))
+
+                    if not p115_calls:
+                        fail_reasons.append("P115Client 未发现可用离线下载方法")
+
                     for call_name, call_func in p115_calls:
                         try:
                             res = call_func()
@@ -339,10 +360,10 @@ class movie115_organizer(_PluginBase):
         if res is True:
             return True
         if isinstance(res, dict):
-            if res.get("state"):
+            if res.get("state") or res.get("code") == 0 or res.get("errno") == 0:
                 return True
             data = res.get("data")
-            if isinstance(data, dict) and data.get("state"):
+            if isinstance(data, dict) and (data.get("state") or data.get("code") == 0 or data.get("errno") == 0):
                 return True
         return False
 

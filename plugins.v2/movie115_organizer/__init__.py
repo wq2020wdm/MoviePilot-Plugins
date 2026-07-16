@@ -20,7 +20,7 @@ class movie115_organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList强制刷新与mdcx刮削。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.7.3"
+    plugin_version = "2.7.4"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -250,7 +250,7 @@ class movie115_organizer(_PluginBase):
                 p115_client = P115Client(cookie)
                 logger.info("【115离线】检测到 Cookie，成功初始化 P115Client 独立逃生舱。")
             except Exception as e:
-                logger.error(f"【115离线】P115Client 初始化报错: {e}")
+                logger.warning(f"【115离线】P115Client 不兼容，已跳过并改用 U115Pan OpenAPI: {e}")
 
         success_count = 0
         fail_count = 0
@@ -316,19 +316,25 @@ class movie115_organizer(_PluginBase):
                         except Exception as e:
                             fail_reasons.append(f"u115.client Payload 异常: {e}")
 
-                if not is_success and hasattr(u115, '_request_api'):
+                if not is_success and u115 and hasattr(u115, '_request_api'):
                     try:
+                        # MoviePilot 的 U115Pan 使用 _request_api(method, endpoint, ...)，
+                        # 不能将完整 URL 作为 url 关键字参数传入。离线任务是 Open API
+                        # 的 add_task_urls 接口，urls 为换行分隔的链接字符串。
                         res = u115._request_api(
-                            url="https://proapi.115.com/app/lixian/add_task_url",
-                            method="POST",
-                            data=payload
+                            "POST",
+                            "/open/offline/add_task_urls",
+                            data={
+                                "urls": url.strip(),
+                                "wp_path_id": cid_int,
+                            },
                         )
                         if self._is_offline_success(res):
                             is_success = True
                         else:
-                            fail_reasons.append(f"proapi 旧接口返回失败: {self._brief_res(res)}")
+                            fail_reasons.append(f"U115Pan OpenAPI 返回失败: {self._brief_res(res)}")
                     except Exception as e:
-                        fail_reasons.append(f"proapi 旧接口异常: {e}")
+                        fail_reasons.append(f"U115Pan OpenAPI 异常: {e}")
 
                 if not is_success:
                     detail = "；".join(fail_reasons) or "未找到可用离线接口"

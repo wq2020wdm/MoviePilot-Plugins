@@ -16,7 +16,7 @@ from app.schemas.types import EventType
 
 
 class movie115_organizer(_PluginBase):
-    plugin_id = "movie115_organizer"
+    plugin_id = "Movie115Organizer"
     plugin_name = "115 目录洗白整理"
     plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList强制刷新与mdcx刮削。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
@@ -739,3 +739,5 @@ class movie115_organizer(_PluginBase):
             "strm_template": "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}",
             "mdcx_container": "", "openlist_url": "", "openlist_token": "", "openlist_mount_path": "",
         }
+
+Movie115Organizer = movie115_organizer

@@ -1,12 +1,16 @@
 {
-  "movie115_organizer": {
-    "id": "movie115_organizer",
+  "Movie115Organizer": {
+    "id": "Movie115Organizer",
     "name": "115 目录洗白整理",
     "description": "监控115路径，自动清理小文件、重命名并归档。适配 V2 OpenAPI。",
     "version": "2.7.4",
     "author": "wq2020wdm",
     "icon": "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png",
-    "labels": ["115", "整理", "自动化"],
+    "labels": [
+      "115",
+      "整理",
+      "自动化"
+    ],
     "level": 1
   }
 }

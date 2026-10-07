@@ -15,7 +15,7 @@ from app.schemas.file import FileItem
 from app.schemas.types import EventType
 
 
-class movie115_organizer(_PluginBase):
+class Movie115Organizer(_PluginBase):
     plugin_id = "Movie115Organizer"
     plugin_name = "115 目录洗白整理"
     plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList强制刷新与mdcx刮削。"

@@ -739,3 +739,6 @@ class movie115_organizer(_PluginBase):
             "strm_template": "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}",
             "mdcx_container": "", "openlist_url": "", "openlist_token": "", "openlist_mount_path": "",
         }
+
+# 适配 MoviePilot V3 类名匹配规则
+Movie115Organizer = movie115_organizer

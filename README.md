@@ -32,17 +32,27 @@
 
 ## 📦 安装与配置
 
-### 1. 插件安装
-1. 在 MoviePilot **设置 -> 插件** 中，添加自定义插件仓库：
-   `https://github.com/wq2020wdm/MoviePilot-Plugins`
-2. 在 **插件市场** 中找到 “115 目录洗白整理” 并在后台完成安装。
+### 1. 插件安装（MoviePilot V3）
 
-### 2. 依赖环境 (⚠️ 重要)
-如果你启用了“离线逃生舱”功能，本插件需要依赖 `p115client` 库进行底层通讯。
-请确保在你的 MoviePilot 插件目录中，与 `__init__.py` 同级存在 `requirements.txt` 文件，内容为：
-```text
-p115client
-(保存该文件后请 重启 MoviePilot 容器，系统将在启动时静默安装此依赖)
+1. 在 MoviePilot **设置 -> 插件** 中，添加自定义插件仓库：`https://github.com/wq2020wdm/MoviePilot-Plugins`
+2. 在 **插件市场** 中找到「115 目录洗白整理」并安装。
+
+仓库结构（仅此一份源码，`plugins.v2` 为兼容旧宿主自动同步的副本）：
+
+```
+package.v3.json                     # V3 插件索引
+plugins.v3/movie115organizer/
+    __init__.py                     # 插件实现（类名必须与插件 ID 一致）
+    requirements.txt                # p115client
+package.v2.json                     # V2 插件索引（兼容旧宿主）
+plugins.v2/movie115organizer/       # 与 v3 内容一致，由 scripts/sync_plugins.py 生成
+```
+
+> 目录名必须是 **小写插件 ID**（`movie115organizer`），而 **类名必须是插件 ID 原样**（`Movie115Organizer`）——V3 加载器用 `pid.lower()` 定位目录、用 `类名.casefold() == 插件ID.casefold()` 匹配类，两者写反就会「插件加载失败」。
+
+### 2. 依赖环境
+
+V3 宿主会在安装时读取同目录 `requirements.txt` 自动安装 `p115client`（用于离线下载逃生舱），无需手动操作；若手动放置插件，重启容器即可触发安装。
 
 ### 3. 设置项指南
 在 MoviePilot 的 WEB 设置界面中，推荐按以下指南配置参数：

@@ -2,8 +2,8 @@
   "Movie115Organizer": {
     "id": "Movie115Organizer",
     "name": "115 目录洗白整理",
-    "description": "监控115路径，自动清理小文件、重命名并归档。适配 V2 OpenAPI。",
-    "version": "2.7.4",
+    "description": "深度清理正则洗白、移动归档、生成STRM、115离线下载，联动 OpenList 刷新与 mdcx 刮削。",
+    "version": "2.7.5",
     "author": "wq2020wdm",
     "icon": "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png",
     "labels": [
@@ -12,6 +12,10 @@
       "自动化"
     ],
     "level": 1,
-    "repo_url": "https://github.com/wq2020wdm/MoviePilot-Plugins"
+    "repo_url": "https://github.com/wq2020wdm/MoviePilot-Plugins",
+    "history": {
+      "v2.7.5": "修复 V3 安装后加载失败：删除残留的旧类名别名（NameError）、修正 _get_u115 对未定义全局的引用；源码目录统一为小写插件 ID 并清理重复副本",
+      "v2.7.4": "适配 V3 类名匹配规则"
+    }
   }
 }

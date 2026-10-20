@@ -20,7 +20,7 @@ class Movie115Organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList强制刷新与mdcx刮削。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.7.4"
+    plugin_version = "2.7.5"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -379,12 +379,13 @@ class Movie115Organizer(_PluginBase):
         return text if len(text) <= 300 else f"{text[:300]}..."
 
     def _get_u115(self):
-        if movie115_organizer._u115_inst is not None:
-            return movie115_organizer._u115_inst
+        cls = type(self)
+        if cls._u115_inst is not None:
+            return cls._u115_inst
         try:
             from app.modules.filemanager.storages.u115 import U115Pan
             inst = U115Pan()
-            movie115_organizer._u115_inst = inst
+            cls._u115_inst = inst
             return inst
         except Exception as e:
             logger.error(f"【115整理】获取 U115Pan 失败: {e}", exc_info=True)
@@ -514,7 +515,7 @@ class Movie115Organizer(_PluginBase):
             total_strm = 0
 
             for monitor_path in paths:
-                logger.info(f"【115整理】======================================")
+                logger.info("【115整理】======================================")
                 logger.info(f"【115整理】开始扫描 115 目录: {monitor_path}")
                 parent_item = self._get_fileitem(storage, monitor_path)
                 if not parent_item:
@@ -739,6 +740,3 @@ class Movie115Organizer(_PluginBase):
             "strm_template": "http://10.0.0.5:7811/redirect?path={cloud_file}&pickcode={pick_code}",
             "mdcx_container": "", "openlist_url": "", "openlist_token": "", "openlist_mount_path": "",
         }
-
-# 适配 MoviePilot V3 类名匹配规则
-Movie115Organizer = movie115_organizer

@@ -20,7 +20,7 @@ class Movie115Organizer(_PluginBase):
     plugin_name = "115 目录洗白整理"
     plugin_desc = "深度清理正则洗白，移动生成STRM，支持离线下载，联动OpenList强制刷新与mdcx刮削。"
     plugin_icon = "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png"
-    plugin_version = "2.7.5"
+    plugin_version = "2.7.6"
     plugin_author = "wq2020wdm"
     plugin_order = 30
     auth_level = 1
@@ -362,6 +362,32 @@ class Movie115Organizer(_PluginBase):
             threading.Thread(target=trigger_clean, daemon=True).start()
 
     @staticmethod
+    def _is_offline_duplicate(res) -> bool:
+        """判断 115 是否返回“任务已存在”(10008)。
+
+        离线接口重放（首次请求已建任务但响应丢失）时会返回该错误码，
+        此时任务已进入离线列表，应按幂等语义视为添加成功。
+        """
+        if not isinstance(res, dict):
+            return False
+        candidates = [res]
+        data = res.get("data")
+        if isinstance(data, dict):
+            candidates.append(data)
+        for item in candidates:
+            for key in ("code", "errno", "errcode"):
+                try:
+                    if int(item.get(key) or 0) == 10008:
+                        return True
+                except (TypeError, ValueError):
+                    continue
+            for key in ("message", "error_msg", "error"):
+                text = item.get(key)
+                if isinstance(text, str) and "任务已存在" in text:
+                    return True
+        return False
+
+    @staticmethod
     def _is_offline_success(res) -> bool:
         if res is True:
             return True
@@ -370,6 +396,9 @@ class Movie115Organizer(_PluginBase):
                 return True
             data = res.get("data")
             if isinstance(data, dict) and (data.get("state") or data.get("code") == 0 or data.get("errno") == 0):
+                return True
+            # 10008=任务已存在：任务早已在离线列表，不应判为失败
+            if Movie115Organizer._is_offline_duplicate(res):
                 return True
         return False
 
@@ -595,6 +624,9 @@ class Movie115Organizer(_PluginBase):
                 storage.rename_file(folder, new_folder_name)
                 logger.info(f"【115整理】父文件夹同步重命名成功: {fname} -> {new_folder_name}")
                 folder.name = new_folder_name
+                # 父目录改名后必须同步 path，否则后续移动会按旧路径严格查源而失败
+                if folder.path:
+                    folder.path = (Path(folder.path.rstrip("/")).parent / new_folder_name).as_posix() + "/"
             except Exception as e:
                 logger.warning(f"【115整理】重命名父文件夹失败 {fname}: {e}")
 
@@ -643,10 +675,13 @@ class Movie115Organizer(_PluginBase):
 
     def _do_move(self, src: FileItem, target_path: str) -> bool:
         u115 = self._get_u115()
-        if u115 is None: return False
+        if u115 is None:
+            logger.error("【115整理】移动失败：未获取到 115 存储实例")
+            return False
         try:
             return bool(u115.move(src, Path(target_path), src.name))
-        except Exception:
+        except Exception as e:
+            logger.error(f"【115整理】移动异常 {src.path}: {e}", exc_info=True)
             return False
 
     def _get_fileitem(self, storage: StorageChain, path: str) -> Optional[FileItem]:

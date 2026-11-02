@@ -3,7 +3,7 @@
     "id": "Movie115Organizer",
     "name": "115 目录洗白整理",
     "description": "深度清理正则洗白、移动归档、生成STRM、115离线下载，联动 OpenList 刷新与 mdcx 刮削。",
-    "version": "2.7.5",
+    "version": "2.7.6",
     "author": "wq2020wdm",
     "icon": "https://raw.githubusercontent.com/wq2020wdm/MoviePilot-Plugins/main/icons/98tang.png",
     "labels": [
@@ -12,6 +12,9 @@
       "自动化"
     ],
     "level": 1,
-    "repo_url": "https://github.com/wq2020wdm/MoviePilot-Plugins"
+    "repo_url": "https://github.com/wq2020wdm/MoviePilot-Plugins",
+    "history": {
+      "v2.7.6": "修复离线下载误报失败：115 返回 10008(任务已存在) 时按成功处理——首次请求已建任务但响应经代理丢失返回 502，重放被判失败；同时修复父目录洗白改名后未同步 path，导致随后移动必然失败的问题"
+    }
   }
 }
